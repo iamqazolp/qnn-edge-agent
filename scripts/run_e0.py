@@ -35,8 +35,10 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--skip-ppl", action="store_true")
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--output", type=str, default="results/E0.json")
+    parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
+    if args.output is None:
+        args.output = "results/smoke/E0.json" if args.limit else "results/E0.json"
 
     device = args.device
     if device is None:
