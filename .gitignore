@@ -7,3 +7,6 @@ results/cache/
 *.onnx
 *.onnx.data
 results/smoke/
+*.zip
+results/npu_probe/aihub_quantized/
+results/npu_probe/*_inference.json
