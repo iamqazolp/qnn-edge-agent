@@ -305,3 +305,43 @@ def test_decode_block_export(tiny_qwen2_layer: Qwen2DecoderLayer):
     assert outs[0].shape == (1, 1, hidden_size)
     assert outs[1].shape == (1, num_kv_heads, kv_seq_len + 1, head_dim)
     assert outs[2].shape == (1, num_kv_heads, kv_seq_len + 1, head_dim)
+
+
+def test_weight_requantization_is_exact(tiny_qwen2_layer: Qwen2DecoderLayer):
+    onnx_model = export_prefill_block(
+        layer=tiny_qwen2_layer,
+        seq_len=16,
+        opset_version=21,
+        mask_as_constant=True,
+    )
+
+    for bits in (8, 4):
+        qdq_model = insert_qdq(
+            onnx_model,
+            weight_bits=bits,
+            act_bits=16,
+        )
+
+        inits = {init.name: init for init in qdq_model.graph.initializer}
+        qmax = (1 << (bits - 1)) - 1
+        qmin = -(1 << (bits - 1))
+
+        from onnx import numpy_helper
+
+        checked = 0
+        for name, init in inits.items():
+            if name.endswith("_grid"):
+                base_name = name[:-5]
+                w_on_grid = numpy_helper.to_array(init)
+                scale = numpy_helper.to_array(inits[f"{base_name}_scale"])
+
+                w_q_re = np.clip(np.round(w_on_grid / scale[None, :]), qmin, qmax).astype(np.int8)
+                w_reconstructed = (w_q_re.astype(np.float32) * scale[None, :]).astype(np.float32)
+
+                assert np.array_equal(w_on_grid, w_reconstructed), (
+                    f"Re-quantization not exact for {name} with bits={bits}"
+                )
+                checked += 1
+
+        assert checked == 7, f"Expected 7 linear weight grids, found {checked}"
+

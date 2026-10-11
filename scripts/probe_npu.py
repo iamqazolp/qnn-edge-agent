@@ -281,18 +281,14 @@ def probe_variant(
                 calib_entries = {k: [v] for k, v in feed.items()}
                 fp_model_path = output_dir / "fp16_block.onnx"
 
-                # Check if we already have the completed quantize job
-                if variant == "w4a16":
-                    qjob = client.get_job("j5q1ex3mg")
-                else:
-                    qjob = client.submit_quantize_job(
-                        model=str(fp_model_path),
-                        calibration_data=calib_entries,
-                        weights_dtype=target_w_dtype,
-                        activations_dtype=target_a_dtype,
-                        name=f"quantize_{variant}",
-                    )
-                    qjob.wait()
+                qjob = client.submit_quantize_job(
+                    model=str(fp_model_path),
+                    calibration_data=calib_entries,
+                    weights_dtype=target_w_dtype,
+                    activations_dtype=target_a_dtype,
+                    name=f"quantize_{variant}",
+                )
+                qjob.wait()
 
                 quant_model = qjob.get_target_model()
                 fb_cjob = client.submit_compile_job(

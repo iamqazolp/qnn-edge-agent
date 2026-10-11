@@ -167,18 +167,18 @@ def insert_qdq(
             scale_cont = np.ascontiguousarray(scale)
             zp_cont = np.ascontiguousarray(zp)
 
-            w_q_name = f"{w_name}_q"
+            w_on_grid = (w_q_cont.astype(np.float32) * scale_cont[None, :]).astype(np.float32)
+
+            w_grid_name = f"{w_name}_grid"
             w_scale_name = f"{w_name}_scale"
             w_zp_name = f"{w_name}_zp"
+            w_q_name = f"{w_name}_q"
             w_dq_name = f"{w_name}_dq"
 
+            w_grid_proto = numpy_helper.from_array(w_on_grid, name=w_grid_name)
+            scale_proto = numpy_helper.from_array(scale_cont, name=w_scale_name)
+
             if weight_bits == 4:
-                w_proto = helper.make_tensor(
-                    w_q_name,
-                    onnx.TensorProto.INT4,
-                    w_onnx.shape,
-                    w_q_cont.flatten().tolist(),
-                )
                 zp_proto = helper.make_tensor(
                     w_zp_name,
                     onnx.TensorProto.INT4,
@@ -186,12 +186,17 @@ def insert_qdq(
                     zp_cont.tolist(),
                 )
             else:
-                w_proto = numpy_helper.from_array(w_q_cont, name=w_q_name)
                 zp_proto = numpy_helper.from_array(zp_cont, name=w_zp_name)
 
-            scale_proto = numpy_helper.from_array(scale_cont, name=w_scale_name)
-            new_inits.extend([w_proto, scale_proto, zp_proto])
+            new_inits.extend([w_grid_proto, scale_proto, zp_proto])
 
+            q_w_node = helper.make_node(
+                "QuantizeLinear",
+                inputs=[w_grid_name, w_scale_name, w_zp_name],
+                outputs=[w_q_name],
+                name=f"{w_name}_quant",
+                axis=axis,
+            )
             dq_w_node = helper.make_node(
                 "DequantizeLinear",
                 inputs=[w_q_name, w_scale_name, w_zp_name],
@@ -199,7 +204,7 @@ def insert_qdq(
                 name=f"{w_name}_dequant",
                 axis=axis,
             )
-            new_nodes.append(dq_w_node)
+            new_nodes.extend([q_w_node, dq_w_node])
             node.input[1] = w_dq_name
             inits_to_remove.add(w_name)
 
