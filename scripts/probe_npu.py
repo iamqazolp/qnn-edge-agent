@@ -388,10 +388,18 @@ def main() -> None:
         default=REPO_ROOT / "results" / "npu_probe",
         help="Directory to save artifacts and summary.",
     )
+    parser.add_argument(
+        "--variants",
+        type=str,
+        default="fp16,w8a16,w4a16",
+        help="Comma-separated variants to probe (e.g. 'w4a16' or 'fp16,w8a16,w4a16').",
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     client = hub_client()
+
+    selected_variants = [v.strip() for v in args.variants.split(",") if v.strip()]
 
     print(f"Starting NPU hardware probe targeting '{args.device}'...")
     print(f"Extracting layer {args.layer_idx} from {MODEL_ID} and capturing calibration data...")
@@ -407,47 +415,47 @@ def main() -> None:
         "sin": ((1, args.seq_len, sin.shape[-1]), "float32"),
     }
 
-    # 1. Export FP ONNX block
     fp_onnx_path = args.output_dir / "fp16_block.onnx"
-    print(f"Exporting FP prefill block to {fp_onnx_path}...")
-    export_prefill_block(
-        layer=layer,
-        seq_len=args.seq_len,
-        output_path=fp_onnx_path,
-        opset_version=21,
-        mask_as_constant=True,
-    )
+    if not fp_onnx_path.exists() or "fp16" in selected_variants:
+        print(f"Exporting FP prefill block to {fp_onnx_path}...")
+        export_prefill_block(
+            layer=layer,
+            seq_len=args.seq_len,
+            output_path=fp_onnx_path,
+            opset_version=21,
+            mask_as_constant=True,
+        )
 
-    # 2. Export W8A16 QDQ block
-    w8_onnx_path = args.output_dir / "w8a16_block.onnx"
-    print(f"Generating W8A16 QDQ block to {w8_onnx_path}...")
-    insert_qdq(
-        onnx.load(str(fp_onnx_path)),
-        weight_bits=8,
-        act_bits=16,
-        calibration_inputs=[feed],
-        output_path=w8_onnx_path,
-    )
+    variants_to_run = []
+    if "fp16" in selected_variants:
+        variants_to_run.append(("fp16", fp_onnx_path))
 
-    # 3. Export W4A16 QDQ block
-    w4_onnx_path = args.output_dir / "w4a16_block.onnx"
-    print(f"Generating W4A16 QDQ block to {w4_onnx_path}...")
-    insert_qdq(
-        onnx.load(str(fp_onnx_path)),
-        weight_bits=4,
-        act_bits=16,
-        calibration_inputs=[feed],
-        output_path=w4_onnx_path,
-    )
+    if "w8a16" in selected_variants:
+        w8_onnx_path = args.output_dir / "w8a16_block.onnx"
+        print(f"Generating W8A16 QDQ block to {w8_onnx_path}...")
+        insert_qdq(
+            onnx.load(str(fp_onnx_path)),
+            weight_bits=8,
+            act_bits=16,
+            calibration_inputs=[feed],
+            output_path=w8_onnx_path,
+        )
+        variants_to_run.append(("w8a16", w8_onnx_path))
 
-    variants = [
-        ("fp16", fp_onnx_path),
-        ("w8a16", w8_onnx_path),
-        ("w4a16", w4_onnx_path),
-    ]
+    if "w4a16" in selected_variants:
+        w4_onnx_path = args.output_dir / "w4a16_block.onnx"
+        print(f"Generating W4A16 QDQ block to {w4_onnx_path}...")
+        insert_qdq(
+            onnx.load(str(fp_onnx_path)),
+            weight_bits=4,
+            act_bits=16,
+            calibration_inputs=[feed],
+            output_path=w4_onnx_path,
+        )
+        variants_to_run.append(("w4a16", w4_onnx_path))
 
     summary_records = []
-    for var_name, var_path in variants:
+    for var_name, var_path in variants_to_run:
         rec = probe_variant(
             variant=var_name,
             onnx_path=var_path,
@@ -461,12 +469,30 @@ def main() -> None:
         summary_records.append(rec)
 
     summary_file = args.output_dir / "summary.json"
+    existing_records = []
+    if summary_file.exists():
+        try:
+            with open(summary_file, "r") as f:
+                existing_records = json.load(f)
+        except Exception:
+            existing_records = []
+
+    merged_by_var = {r["variant"]: r for r in existing_records}
+    for rec in summary_records:
+        merged_by_var[rec["variant"]] = rec
+
+    ordered_keys = ["fp16", "w8a16", "w4a16"]
+    final_records = [merged_by_var[k] for k in ordered_keys if k in merged_by_var]
+    for k, v in merged_by_var.items():
+        if k not in ordered_keys:
+            final_records.append(v)
+
     with open(summary_file, "w") as f:
-        json.dump(summary_records, f, indent=2)
+        json.dump(final_records, f, indent=2)
 
     print(f"\n================ NPU Probe Complete ================")
     print(f"Summary written to {summary_file}")
-    for rec in summary_records:
+    for rec in final_records:
         print(
             f"Variant: {rec['variant']:<6} | Status: {rec['status']:<7} | "
             f"Latency: {str(rec['latency_median_ms']):<6} ms | "
