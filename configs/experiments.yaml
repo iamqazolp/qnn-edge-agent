@@ -1,0 +1,186 @@
+experiments:
+  E0:
+    id: "E0"
+    smooth: "none"
+    alpha: null
+    default:
+      weight: null
+      act: null
+      adaround: false
+    allocator: "uniform"
+    bit_budget: null
+    clip_search: false
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+      - "constrained"
+
+  E1:
+    id: "E1"
+    smooth: "none"
+    alpha: null
+    default:
+      weight:
+        bits: 8
+        symmetric: true
+        granularity: "per_channel"
+      act:
+        bits: 8
+        symmetric: false
+        granularity: "per_tensor"
+      adaround: false
+    allocator: "uniform"
+    bit_budget: null
+    clip_search: false
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+
+  E2:
+    id: "E2"
+    smooth: "none"
+    alpha: null
+    default:
+      weight:
+        bits: 4
+        symmetric: true
+        granularity: "per_channel"
+      act:
+        bits: 8
+        symmetric: false
+        granularity: "per_tensor"
+      adaround: false
+    allocator: "uniform"
+    bit_budget: null
+    clip_search: false
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+      - "constrained"
+
+  E2a:
+    id: "E2a"
+    smooth: "none"
+    alpha: null
+    default:
+      weight:
+        bits: 4
+        symmetric: true
+        granularity: "per_channel"
+      act:
+        bits: 16
+        symmetric: false
+        granularity: "per_tensor"
+      adaround: false
+    allocator: "uniform"
+    bit_budget: null
+    clip_search: false
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+      - "constrained"
+
+  E2b:
+    id: "E2b"
+    smooth: "none"
+    alpha: null
+    default:
+      weight: null
+      act:
+        bits: 8
+        symmetric: false
+        granularity: "per_tensor"
+      adaround: false
+    allocator: "uniform"
+    bit_budget: null
+    clip_search: false
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+
+  E4:
+    id: "E4"
+    smooth: "ABC"
+    alpha: 0.5
+    default:
+      weight:
+        bits: 4
+        symmetric: true
+        granularity: "per_channel"
+      act:
+        bits: 8
+        symmetric: false
+        granularity: "per_tensor"
+      adaround: false
+    allocator: "uniform"
+    bit_budget: null
+    clip_search: false
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+
+  E4s:
+    id: "E4s"
+    smooth: "ABC"
+    alpha: "search"
+    default:
+      weight:
+        bits: 4
+        symmetric: true
+        granularity: "per_channel"
+      act:
+        bits: 8
+        symmetric: false
+        granularity: "per_tensor"
+      adaround: false
+    allocator: "uniform"
+    bit_budget: null
+    clip_search: false
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+      - "constrained"
+
+  E5:
+    id: "E5"
+    smooth: "ABC"
+    alpha: "search"
+    default:
+      weight:
+        bits: 4
+        symmetric: true
+        granularity: "per_channel"
+      act:
+        bits: 8
+        symmetric: false
+        granularity: "per_tensor"
+      adaround: true
+    allocator: "sqnr_knapsack"
+    bit_budget: 4.6
+    clip_search: true
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+      - "constrained"
+
+  E5h:
+    id: "E5h"
+    smooth: "ABC"
+    alpha: "search"
+    default:
+      weight:
+        bits: 4
+        symmetric: true
+        granularity: "per_channel"
+      act:
+        bits: 16
+        symmetric: false
+        granularity: "per_tensor"
+      adaround: true
+    allocator: "sqnr_knapsack"
+    bit_budget: 4.6
+    clip_search: true
+    kv_bits: 16
+    modes:
+      - "unconstrained"
+      - "constrained"
