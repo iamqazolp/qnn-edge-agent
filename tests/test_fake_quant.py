@@ -158,3 +158,55 @@ def test_recipes_on_tiny_model(tiny_qwen_config, dummy_tokenizer):
         with torch.no_grad():
             out_after = model_copy(dummy_input)
             assert out_after.logits.shape == (1, 8, 1000)
+
+
+PAD_ID = 0
+
+
+class LeftPaddingTokenizer:
+    """Deterministic char-level tokenizer that left-pads with PAD_ID like HF does for decoding."""
+
+    pad_token = "<|pad|>"
+    eos_token = "<|endoftext|>"
+    padding_side = "left"
+
+    def apply_chat_template(self, messages, tools=None, add_generation_prompt=True, tokenize=False):
+        return "\n".join(m.get("content", "") for m in messages)
+
+    def __call__(self, texts, padding=True, truncation=True, max_length=256, return_tensors="pt"):
+        if isinstance(texts, str):
+            texts = [texts]
+        seqs = [[1 + (ord(c) % 997) for c in t][:max_length] for t in texts]
+        width = max(len(s) for s in seqs)
+        input_ids = [[PAD_ID] * (width - len(s)) + s for s in seqs]
+        attention_mask = [[0] * (width - len(s)) + [1] * len(s) for s in seqs]
+        return {
+            "input_ids": torch.tensor(input_ids),
+            "attention_mask": torch.tensor(attention_mask),
+        }
+
+
+def test_calibration_excludes_left_padding(tiny_model):
+    # Make the pad embedding a single-channel spike: after RMSNorm it becomes
+    # sqrt(hidden_size) = 8.0 on channel 0, far above any real-token activation.
+    with torch.no_grad():
+        tiny_model.model.embed_tokens.weight[PAD_ID].zero_()
+        tiny_model.model.embed_tokens.weight[PAD_ID, 0] = 1.0
+
+    calib_items = [
+        {"messages": [{"role": "user", "content": "hi"}]},
+        {"messages": [{"role": "user", "content": "turn on gpio pin twelve and report status"}]},
+    ]
+    tokenizer = LeftPaddingTokenizer()
+
+    padded = calibrate_model(tiny_model, tokenizer, calib_items, batch_size=2)
+    unpadded = calibrate_model(tiny_model, tokenizer, calib_items, batch_size=1)
+
+    # Layer-0 q/k/v inputs are RMSNorm(embedding): position-independent, so the
+    # padded batch must reproduce the per-prompt (pad-free) statistics exactly.
+    name = "model.layers.0.self_attn.q_proj"
+    assert padded.act_scales[name][0] < 8.0 - 1e-3
+    assert torch.allclose(padded.act_scales[name], unpadded.act_scales[name], atol=1e-5)
+    assert padded.group_ranges["model.layers.0.qkv"] == pytest.approx(
+        unpadded.group_ranges["model.layers.0.qkv"], abs=1e-5
+    )

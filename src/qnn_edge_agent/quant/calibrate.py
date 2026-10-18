@@ -133,6 +133,16 @@ def calibrate_model(
             act_scales[name] = torch.zeros(mod.in_features, dtype=torch.float32, device=device)
 
     hooks = []
+    # Boolean attention mask of the batch currently in flight. Hooks use it to
+    # drop left-padding positions so pad-token activations never enter the stats.
+    batch_state: dict[str, torch.Tensor | None] = {"valid": None}
+
+    def valid_rows(x: torch.Tensor, in_features: int) -> torch.Tensor:
+        flat = x.reshape(-1, in_features).to(torch.float32)
+        valid = batch_state["valid"]
+        if valid is not None and x.dim() == 3 and tuple(x.shape[:2]) == tuple(valid.shape):
+            flat = flat[valid.reshape(-1)]
+        return flat
 
     def make_pre_hook(layer_name: str, group_key: str | None = None):
         def pre_hook(module: nn.Module, args: tuple[torch.Tensor, ...]):
@@ -140,7 +150,9 @@ def calibrate_model(
                 return args
             x = args[0].detach()
             in_features = module.in_features
-            flat = x.reshape(-1, in_features).to(torch.float32)
+            flat = valid_rows(x, in_features)
+            if flat.shape[0] == 0:
+                return args
             curr_max = flat.abs().max(dim=0).values
             act_scales[layer_name] = torch.maximum(act_scales[layer_name], curr_max)
 
@@ -225,9 +237,12 @@ def calibrate_model(
                     encoded = encoded.to(device)
                 else:
                     encoded = {k: v.to(device) if hasattr(v, "to") else v for k, v in encoded.items()}
+                attention_mask = encoded.get("attention_mask")
+                batch_state["valid"] = attention_mask.bool() if attention_mask is not None else None
                 model(**encoded)
 
     finally:
+        batch_state["valid"] = None
         for h in hooks:
             h.remove()
         model.train(was_training)
