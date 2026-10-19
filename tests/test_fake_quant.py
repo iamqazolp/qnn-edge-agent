@@ -210,3 +210,73 @@ def test_calibration_excludes_left_padding(tiny_model):
     assert padded.group_ranges["model.layers.0.qkv"] == pytest.approx(
         unpadded.group_ranges["model.layers.0.qkv"], abs=1e-5
     )
+
+
+def test_calibration_minmax_is_unclipped_superset(tiny_model):
+    calib_items = [
+        {"messages": [{"role": "user", "content": "read modbus register 40001"}]},
+        {"messages": [{"role": "user", "content": "publish telemetry to mqtt topic sensors/temp"}]},
+        {"messages": [{"role": "user", "content": "scan ble beacons"}]},
+    ]
+    stats = calibrate_model(tiny_model, LeftPaddingTokenizer(), calib_items, batch_size=2)
+
+    assert set(stats.group_minmax) == set(stats.group_ranges)
+    assert set(stats.act_minmax) == set(stats.act_ranges)
+    for key, (mse_min, mse_max) in stats.group_ranges.items():
+        full_min, full_max = stats.group_minmax[key]
+        assert full_min <= 0.0 <= full_max
+        assert full_min <= mse_min + 1e-6
+        assert full_max >= mse_max - 1e-6
+
+    # min/max must see every valid token, not just the sampled subset: its
+    # magnitude has to match the running per-channel abs-max of the same input.
+    for i in range(2):
+        full_min, full_max = stats.group_minmax[f"model.layers.{i}.qkv"]
+        abs_max = stats.act_scales[f"model.layers.{i}.self_attn.q_proj"].max().item()
+        assert max(-full_min, full_max) == pytest.approx(abs_max, rel=1e-6)
+
+    assert stats.ranges_for_bits(8) is stats.act_ranges
+    assert stats.ranges_for_bits(16) is stats.act_minmax
+
+
+@pytest.mark.parametrize("as_dict", [False, True])
+def test_apply_recipe_selects_ranges_by_activation_bits(tiny_qwen_config, as_dict):
+    from qnn_edge_agent.quant.calibrate import CalibStats
+
+    torch.manual_seed(0)
+    base_model = Qwen2ForCausalLM(tiny_qwen_config)
+    names = [
+        f"model.layers.{i}.{blk}.{proj}"
+        for i in range(tiny_qwen_config.num_hidden_layers)
+        for blk, projs in (("self_attn", ("q_proj", "k_proj", "v_proj", "o_proj")),
+                           ("mlp", ("gate_proj", "up_proj", "down_proj")))
+        for proj in projs
+    ]
+    stats = CalibStats(
+        act_scales={n: torch.ones(1) for n in names},
+        group_ranges={},
+        act_ranges={n: (-1.0, 1.0) for n in names},  # clipped 8-bit range
+        act_minmax={n: (-50.0, 50.0) for n in names},  # full observed range
+    )
+    calib = stats.to_dict() if as_dict else stats
+
+    x = torch.zeros(1, 1, tiny_qwen_config.hidden_size)
+    x[0, 0, 0] = 40.0
+
+    seen: dict[str, float] = {}
+    for r_id, act_bits in (("E2", 8), ("E2a", 16)):
+        model = copy.deepcopy(base_model)
+        res = apply_recipe(model, make_recipe(r_id, 4, act_bits), calib_stats=calib)
+        q_proj = model.model.layers[0].self_attn.q_proj
+        captured = {}
+        # Registered after apply_recipe, so it observes the fake-quantized input.
+        cap = q_proj.register_forward_pre_hook(lambda m, a: captured.setdefault("x", a[0]))
+        with torch.no_grad():
+            q_proj(x)
+        cap.remove()
+        for h in res["hook_handles"]:
+            h.remove()
+        seen[r_id] = captured["x"][0, 0, 0].item()
+
+    assert seen["E2"] == pytest.approx(1.0, abs=0.01)  # 8-bit clips the outlier
+    assert seen["E2a"] == pytest.approx(40.0, abs=0.01)  # 16-bit preserves it

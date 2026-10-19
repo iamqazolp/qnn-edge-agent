@@ -83,9 +83,10 @@ def apply_recipe(
 
             if calib_stats is not None:
                 if isinstance(calib_stats, CalibStats):
-                    act_ranges = calib_stats.act_ranges
+                    act_ranges = calib_stats.ranges_for_bits(act_bits)
                 elif isinstance(calib_stats, dict):
-                    act_ranges = calib_stats.get("act_ranges", {})
+                    minmax = calib_stats.get("act_minmax") if act_bits >= 16 else None
+                    act_ranges = minmax or calib_stats.get("act_ranges", {})
                 else:
                     act_ranges = {}
 

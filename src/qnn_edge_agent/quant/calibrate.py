@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,14 +18,31 @@ from qnn_edge_agent.quant.grids import (
 @dataclass
 class CalibStats:
     act_scales: dict[str, torch.Tensor]
+    # 8-bit MSE-searched (possibly clipped) ranges.
     group_ranges: dict[str, tuple[float, float]]
     act_ranges: dict[str, tuple[float, float]]
+    # Unclipped min/max over every valid calibration token (always includes 0).
+    group_minmax: dict[str, tuple[float, float]] = field(default_factory=dict)
+    act_minmax: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+    def ranges_for_bits(self, bits: int) -> dict[str, tuple[float, float]]:
+        """Per-layer activation ranges appropriate for a given activation bit width.
+
+        8-bit grids are coarse, so MSE-optimal clipping of rare outliers pays off.
+        16-bit grids have 256x finer steps, so clipping only destroys outliers;
+        use the full observed range instead.
+        """
+        if bits >= 16 and self.act_minmax:
+            return self.act_minmax
+        return self.act_ranges
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "act_scales": {k: v.cpu().tolist() for k, v in self.act_scales.items()},
             "group_ranges": self.group_ranges,
             "act_ranges": self.act_ranges,
+            "group_minmax": self.group_minmax,
+            "act_minmax": self.act_minmax,
         }
 
     @classmethod
@@ -34,6 +51,8 @@ class CalibStats:
             act_scales={k: torch.tensor(v, dtype=torch.float32) for k, v in data["act_scales"].items()},
             group_ranges={k: tuple(v) for k, v in data["group_ranges"].items()},
             act_ranges={k: tuple(v) for k, v in data["act_ranges"].items()},
+            group_minmax={k: tuple(v) for k, v in data.get("group_minmax", {}).items()},
+            act_minmax={k: tuple(v) for k, v in data.get("act_minmax", {}).items()},
         )
 
 
@@ -115,12 +134,16 @@ def calibrate_model(
     act_scales: dict[str, torch.Tensor] = {}
     group_samples: dict[str, list[torch.Tensor]] = {}
     group_counts: dict[str, int] = {}
+    # Running min/max over all valid tokens (not just the sampled subset), seeded
+    # at 0 so the asymmetric grid can always represent zero exactly.
+    group_minmax: dict[str, tuple[float, float]] = {}
 
     for i, layer in enumerate(layers):
         for gname in ("qkv", "o", "gate_up", "down"):
             gkey = f"model.layers.{i}.{gname}"
             group_samples[gkey] = []
             group_counts[gkey] = 0
+            group_minmax[gkey] = (0.0, 0.0)
 
         for proj_name in ("q_proj", "k_proj", "v_proj", "o_proj"):
             mod = getattr(layer.self_attn, proj_name)
@@ -157,6 +180,12 @@ def calibrate_model(
             act_scales[layer_name] = torch.maximum(act_scales[layer_name], curr_max)
 
             if group_key is not None:
+                gmin, gmax = group_minmax[group_key]
+                group_minmax[group_key] = (
+                    min(gmin, float(flat.min().item())),
+                    max(gmax, float(flat.max().item())),
+                )
+
                 current_count = group_counts[group_key]
                 if current_count < max_samples_per_group:
                     needed = max_samples_per_group - current_count
@@ -249,6 +278,7 @@ def calibrate_model(
 
     group_ranges: dict[str, tuple[float, float]] = {}
     act_ranges: dict[str, tuple[float, float]] = {}
+    act_minmax: dict[str, tuple[float, float]] = {}
 
     for i in range(num_layers):
         for gname in ("qkv", "o", "gate_up", "down"):
@@ -260,22 +290,27 @@ def calibrate_model(
             else:
                 best_range = (-1.0, 1.0)
             group_ranges[gkey] = best_range
+            if group_minmax[gkey][1] <= group_minmax[gkey][0]:
+                group_minmax[gkey] = (-1.0, 1.0)
 
-        qkv_range = group_ranges[f"model.layers.{i}.qkv"]
-        o_range = group_ranges[f"model.layers.{i}.o"]
-        gate_up_range = group_ranges[f"model.layers.{i}.gate_up"]
-        down_range = group_ranges[f"model.layers.{i}.down"]
+        for ranges, out in ((group_ranges, act_ranges), (group_minmax, act_minmax)):
+            qkv_range = ranges[f"model.layers.{i}.qkv"]
+            o_range = ranges[f"model.layers.{i}.o"]
+            gate_up_range = ranges[f"model.layers.{i}.gate_up"]
+            down_range = ranges[f"model.layers.{i}.down"]
 
-        act_ranges[f"model.layers.{i}.self_attn.q_proj"] = qkv_range
-        act_ranges[f"model.layers.{i}.self_attn.k_proj"] = qkv_range
-        act_ranges[f"model.layers.{i}.self_attn.v_proj"] = qkv_range
-        act_ranges[f"model.layers.{i}.self_attn.o_proj"] = o_range
-        act_ranges[f"model.layers.{i}.mlp.gate_proj"] = gate_up_range
-        act_ranges[f"model.layers.{i}.mlp.up_proj"] = gate_up_range
-        act_ranges[f"model.layers.{i}.mlp.down_proj"] = down_range
+            out[f"model.layers.{i}.self_attn.q_proj"] = qkv_range
+            out[f"model.layers.{i}.self_attn.k_proj"] = qkv_range
+            out[f"model.layers.{i}.self_attn.v_proj"] = qkv_range
+            out[f"model.layers.{i}.self_attn.o_proj"] = o_range
+            out[f"model.layers.{i}.mlp.gate_proj"] = gate_up_range
+            out[f"model.layers.{i}.mlp.up_proj"] = gate_up_range
+            out[f"model.layers.{i}.mlp.down_proj"] = down_range
 
     return CalibStats(
         act_scales={k: v.cpu() for k, v in act_scales.items()},
         group_ranges=group_ranges,
         act_ranges=act_ranges,
+        group_minmax=group_minmax,
+        act_minmax=act_minmax,
     )
