@@ -1,7 +1,7 @@
 import copy
 import pytest
 import torch
-from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
+from transformers import Qwen2Config, Qwen2ForCausalLM
 
 from qnn_edge_agent.quant.calibrate import calibrate_model
 from qnn_edge_agent.quant.fake_quant import apply_recipe

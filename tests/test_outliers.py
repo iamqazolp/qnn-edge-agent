@@ -1,5 +1,3 @@
-import math
-import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -10,9 +8,7 @@ from qnn_edge_agent.introspect.outliers import (
     OutlierProfiler,
     ProjectionOutlierTracker,
     compute_activation_metrics,
-    compute_channel_max,
     compute_kurtosis,
-    compute_outlier_ratio,
 )
 
 

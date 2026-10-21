@@ -32,3 +32,12 @@ packages = ["src/qnn_edge_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Pyflakes only: catches real bugs (undefined names, unused imports) without
+# imposing style rules on research code.
+select = ["F"]

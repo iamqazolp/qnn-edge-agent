@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import dataclasses
 import json
 import subprocess
@@ -234,9 +233,9 @@ def main() -> None:
         print(f"Calibration completed in {time.time() - t0_calib:.2f}s.", flush=True)
 
     for rid in to_run:
-        print(f"\n==========================================", flush=True)
+        print("\n==========================================", flush=True)
         print(f"Running Recipe {rid}", flush=True)
-        print(f"==========================================", flush=True)
+        print("==========================================", flush=True)
         recipe_dict = exp_registry[rid]
         recipe = parse_recipe_dict(recipe_dict)
 

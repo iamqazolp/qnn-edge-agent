@@ -1,5 +1,3 @@
-import pytest
-
 from qnn_edge_agent.eval.tool_call_eval import (
     compute_eval_scores,
     parse_tool_call,

@@ -9,7 +9,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from qnn_edge_agent.env import MODEL_ID, REPO_ROOT
-from qnn_edge_agent.introspect.outliers import PROJECTION_NAMES, OutlierProfiler
+from qnn_edge_agent.introspect.outliers import OutlierProfiler
 
 
 PLOT_PROJECTIONS = ["q_proj", "o_proj", "up_proj", "down_proj"]

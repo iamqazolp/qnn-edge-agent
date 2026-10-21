@@ -1,7 +1,5 @@
 import argparse
 import json
-import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -16,14 +14,12 @@ from qnn_edge_agent.env import MODEL_ID, NPU_DEVICE, REPO_ROOT, hub_client
 from qnn_edge_agent.npu.block_export import (
     Qwen2BlockPrefillWrapper,
     export_prefill_block,
-    get_real_block,
 )
 from qnn_edge_agent.npu.qdq_insert import insert_qdq
 from qnn_edge_agent.npu.ai_hub import (
     compile_model,
     parse_profile_results,
     profile_model,
-    run_inference,
 )
 
 
@@ -490,7 +486,7 @@ def main() -> None:
     with open(summary_file, "w") as f:
         json.dump(final_records, f, indent=2)
 
-    print(f"\n================ NPU Probe Complete ================")
+    print("\n================ NPU Probe Complete ================")
     print(f"Summary written to {summary_file}")
     for rec in final_records:
         print(

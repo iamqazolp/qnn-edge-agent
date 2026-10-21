@@ -242,7 +242,7 @@ def build_datasets(
 
 if __name__ == "__main__":
     eval_recs, calib_recs = build_datasets()
-    print(f"Successfully generated datasets:")
+    print("Successfully generated datasets:")
     print(f"  eval_tool_calls.jsonl: {len(eval_recs)} records")
     print(
         f"    - bfcl_simple: {sum(1 for r in eval_recs if r['source'] == 'bfcl_simple')}"
