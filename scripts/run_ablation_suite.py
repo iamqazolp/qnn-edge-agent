@@ -214,7 +214,7 @@ def main() -> None:
 
     calib_stats: CalibStats | None = None
     needs_calib = any(
-        exp_registry[rid].get("default", {}).get("act") is not None
+        exp_registry[rid].get("default", {}).get("act") is not None or exp_registry[rid].get("smooth", "none") not in ("none", None)
         for rid in to_run
     )
 
@@ -299,6 +299,7 @@ def main() -> None:
             "avg_bits_linear": apply_info["avg_bits_linear"],
             "footprint_mb": apply_info["footprint_mb"],
             "wikitext2_ppl": ppl,
+            "chosen_alphas": apply_info.get("chosen_alphas", {}),
             "layer_sqnr_db": {},
             "eval": eval_results,
             "per_item": per_item_results,

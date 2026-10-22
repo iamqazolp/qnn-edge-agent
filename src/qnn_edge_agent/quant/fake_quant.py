@@ -13,6 +13,7 @@ from qnn_edge_agent.quant.grids import (
     fake_quant_weight_symmetric,
     quantize_asymmetric_per_tensor,
 )
+from qnn_edge_agent.quant.smooth import apply_smoothquant
 from qnn_edge_agent.types import Recipe
 
 
@@ -24,13 +25,54 @@ def apply_recipe(
 ) -> dict[str, Any]:
     hook_handles: list[torch.utils.hooks.RemovableHandle] = []
 
-    if recipe.id == "E0":
+    if recipe.allocator not in ("uniform", None) and layer_bits_map is None:
+        raise NotImplementedError(
+            f"Recipe '{recipe.id}' requests allocator='{recipe.allocator}', "
+            "which requires a resolved layer_bits_map."
+        )
+    if recipe.default.adaround:
+        raise NotImplementedError(
+            f"Recipe '{recipe.id}' requests adaround=True, which is not yet implemented."
+        )
+    if recipe.clip_search:
+        raise NotImplementedError(
+            f"Recipe '{recipe.id}' requests clip_search=True, which is not yet implemented."
+        )
+
+    is_unmodified_fp = (
+        recipe.smooth in ("none", None)
+        and recipe.default.weight is None
+        and recipe.default.act is None
+        and layer_bits_map is None
+    )
+    if is_unmodified_fp:
         avg_bits, footprint = compute_model_footprint(model, layer_bits_map=None)
         return {
             "avg_bits_linear": avg_bits,
             "footprint_mb": footprint,
             "hook_handles": hook_handles,
+            "chosen_alphas": {},
         }
+
+    chosen_alphas: dict[str, float] = {}
+    active_calib: CalibStats | dict[str, Any] | None = calib_stats
+
+    if recipe.smooth not in ("none", None):
+        if calib_stats is None:
+            raise ValueError(
+                f"Recipe '{recipe.id}' enables SmoothQuant (smooth={recipe.smooth!r}) "
+                "and requires calib_stats."
+            )
+        w_bits_hint = recipe.default.weight.bits if recipe.default.weight is not None else 4
+        a_bits_hint = recipe.default.act.bits if recipe.default.act is not None else 8
+        active_calib, chosen_alphas = apply_smoothquant(
+            model=model,
+            calib_stats=calib_stats,
+            mode=recipe.smooth,
+            alpha=recipe.alpha,
+            weight_bits=w_bits_hint,
+            act_bits=a_bits_hint,
+        )
 
     layers = getattr(getattr(model, "model", model), "layers", None)
     decoder_linears: list[tuple[str, nn.Linear]] = []
@@ -81,12 +123,12 @@ def apply_recipe(
             scale: float | None = None
             zp: int | None = None
 
-            if calib_stats is not None:
-                if isinstance(calib_stats, CalibStats):
-                    act_ranges = calib_stats.ranges_for_bits(act_bits)
-                elif isinstance(calib_stats, dict):
-                    minmax = calib_stats.get("act_minmax") if act_bits >= 16 else None
-                    act_ranges = minmax or calib_stats.get("act_ranges", {})
+            if active_calib is not None:
+                if isinstance(active_calib, CalibStats):
+                    act_ranges = active_calib.ranges_for_bits(act_bits)
+                elif isinstance(active_calib, dict):
+                    minmax = active_calib.get("act_minmax") if act_bits >= 16 else None
+                    act_ranges = minmax or active_calib.get("act_ranges", {})
                 else:
                     act_ranges = {}
 
@@ -127,4 +169,5 @@ def apply_recipe(
         "avg_bits_linear": avg_bits,
         "footprint_mb": footprint,
         "hook_handles": hook_handles,
+        "chosen_alphas": chosen_alphas,
     }

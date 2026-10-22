@@ -24,6 +24,10 @@ class CalibStats:
     # Unclipped min/max over every valid calibration token (always includes 0).
     group_minmax: dict[str, tuple[float, float]] = field(default_factory=dict)
     act_minmax: dict[str, tuple[float, float]] = field(default_factory=dict)
+    # Per-channel signed extrema over all valid tokens, used to recompute exact
+    # post-SmoothQuant activation ranges after per-channel scaling.
+    act_ch_min: dict[str, torch.Tensor] = field(default_factory=dict)
+    act_ch_max: dict[str, torch.Tensor] = field(default_factory=dict)
 
     def ranges_for_bits(self, bits: int) -> dict[str, tuple[float, float]]:
         """Per-layer activation ranges appropriate for a given activation bit width.
@@ -43,6 +47,8 @@ class CalibStats:
             "act_ranges": self.act_ranges,
             "group_minmax": self.group_minmax,
             "act_minmax": self.act_minmax,
+            "act_ch_min": {k: v.cpu().tolist() for k, v in self.act_ch_min.items()},
+            "act_ch_max": {k: v.cpu().tolist() for k, v in self.act_ch_max.items()},
         }
 
     @classmethod
@@ -53,6 +59,8 @@ class CalibStats:
             act_ranges={k: tuple(v) for k, v in data["act_ranges"].items()},
             group_minmax={k: tuple(v) for k, v in data.get("group_minmax", {}).items()},
             act_minmax={k: tuple(v) for k, v in data.get("act_minmax", {}).items()},
+            act_ch_min={k: torch.tensor(v, dtype=torch.float32) for k, v in data.get("act_ch_min", {}).items()},
+            act_ch_max={k: torch.tensor(v, dtype=torch.float32) for k, v in data.get("act_ch_max", {}).items()},
         )
 
 
@@ -132,6 +140,8 @@ def calibrate_model(
 
     num_layers = len(layers)
     act_scales: dict[str, torch.Tensor] = {}
+    act_ch_min: dict[str, torch.Tensor] = {}
+    act_ch_max: dict[str, torch.Tensor] = {}
     group_samples: dict[str, list[torch.Tensor]] = {}
     group_counts: dict[str, int] = {}
     # Running min/max over all valid tokens (not just the sampled subset), seeded
@@ -149,11 +159,15 @@ def calibrate_model(
             mod = getattr(layer.self_attn, proj_name)
             name = f"model.layers.{i}.self_attn.{proj_name}"
             act_scales[name] = torch.zeros(mod.in_features, dtype=torch.float32, device=device)
+            act_ch_min[name] = torch.zeros(mod.in_features, dtype=torch.float32, device=device)
+            act_ch_max[name] = torch.zeros(mod.in_features, dtype=torch.float32, device=device)
 
         for proj_name in ("gate_proj", "up_proj", "down_proj"):
             mod = getattr(layer.mlp, proj_name)
             name = f"model.layers.{i}.mlp.{proj_name}"
             act_scales[name] = torch.zeros(mod.in_features, dtype=torch.float32, device=device)
+            act_ch_min[name] = torch.zeros(mod.in_features, dtype=torch.float32, device=device)
+            act_ch_max[name] = torch.zeros(mod.in_features, dtype=torch.float32, device=device)
 
     hooks = []
     # Boolean attention mask of the batch currently in flight. Hooks use it to
@@ -178,6 +192,8 @@ def calibrate_model(
                 return args
             curr_max = flat.abs().max(dim=0).values
             act_scales[layer_name] = torch.maximum(act_scales[layer_name], curr_max)
+            act_ch_min[layer_name] = torch.minimum(act_ch_min[layer_name], flat.min(dim=0).values)
+            act_ch_max[layer_name] = torch.maximum(act_ch_max[layer_name], flat.max(dim=0).values)
 
             if group_key is not None:
                 gmin, gmax = group_minmax[group_key]
@@ -313,4 +329,6 @@ def calibrate_model(
         act_ranges=act_ranges,
         group_minmax=group_minmax,
         act_minmax=act_minmax,
+        act_ch_min={k: v.cpu() for k, v in act_ch_min.items()},
+        act_ch_max={k: v.cpu() for k, v in act_ch_max.items()},
     )
