@@ -19,6 +19,9 @@ dependencies = [
     "qai-hub>=0.20",
 ]
 
+[project.scripts]
+qea = "qnn_edge_agent.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
@@ -32,7 +35,6 @@ packages = ["src/qnn_edge_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-
 
 [tool.ruff]
 target-version = "py310"
