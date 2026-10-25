@@ -4,6 +4,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -12,12 +13,17 @@ import torch
 import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from qnn_edge_agent.agent.reliability import (
+    HuggingFaceToolGenerator,
+    ReliableToolAgent,
+)
+from qnn_edge_agent.agent.tools import EdgeToolEnvironment, load_edge_tool_schemas
 from qnn_edge_agent.env import MODEL_ID, REPO_ROOT
 from qnn_edge_agent.eval.perplexity import evaluate_wikitext2_perplexity
 from qnn_edge_agent.eval.tool_call_eval import compute_eval_scores, evaluate_tool_calls
 from qnn_edge_agent.quant.calibrate import CalibStats, calibrate_model
 from qnn_edge_agent.quant.fake_quant import apply_recipe
-from qnn_edge_agent.types import ItemOutcome, LayerQuant, QuantFormat, Recipe
+from qnn_edge_agent.types import EvalMode, ItemOutcome, LayerQuant, QuantFormat, Recipe
 
 PC_TOOL_NAMES: frozenset[str] = frozenset({
     "local_file_search",
@@ -422,10 +428,92 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_iot_item(item_id: str) -> dict[str, Any]:
+    iot_data = json.loads((REPO_ROOT / "data" / "iot_items.json").read_text(encoding="utf-8"))
+    for it in iot_data.get("eval", []) + iot_data.get("calibration", []):
+        if it["id"] == item_id:
+            return dict(it)
+    raise KeyError(f"Unknown item_id {item_id!r} in data/iot_items.json")
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    ws_dir = Path(args.workspace_dir) if args.workspace_dir else Path(tempfile.mkdtemp(prefix="qea_ws_"))
+    env = EdgeToolEnvironment(ws_dir, seed_workspace=True)
+
+    item = _load_iot_item(args.item_id)
+    messages = (
+        [{"role": "user", "content": args.prompt}]
+        if args.prompt
+        else item["messages"]
+    )
+    tools = item["tools"] if not args.prompt else load_edge_tool_schemas()
+
+    if args.offline_demo:
+        gt = item["ground_truth"]
+        valid_call = json.dumps({"name": gt["name"], "arguments": gt["args"]})
+
+        def primary_gen(_m: list[dict[str, Any]], _t: list[dict[str, Any]], mode: EvalMode) -> str:
+            if args.simulate_fault == "corrupted_json" and mode == "unconstrained":
+                return '<tool_call>\n{"name": "' + gt["name"] + '", "arguments": {bad_json'
+            if args.simulate_fault == "wrong_schema":
+                return '<tool_call>\n{"name": "' + gt["name"] + '", "arguments": {"invalid_arg": 999}}\n</tool_call>'
+            return f"<tool_call>\n{valid_call}\n</tool_call>"
+
+        def fallback_gen(_m: list[dict[str, Any]], _t: list[dict[str, Any]], _mode: EvalMode) -> str:
+            return f"<tool_call>\n{valid_call}\n</tool_call>"
+
+        agent = ReliableToolAgent(
+            env=env,
+            primary_generator=primary_gen,
+            fallback_generator=None if args.fallback_recipe == "none" else fallback_gen,
+            enable_grammar_retry=not args.no_grammar_retry,
+        )
+    else:
+        registry = load_recipe_registry(Path(args.config) if args.config else None)
+        if args.recipe not in registry:
+            raise KeyError(f"Unknown primary recipe {args.recipe!r}")
+        primary_recipe = registry[args.recipe]
+
+        device = _resolve_device(args.device)
+        primary_model, tokenizer = _load_model_and_tokenizer(args.model, device)
+        calib_path = REPO_ROOT / "data" / "calibration_128.jsonl"
+        with open(calib_path, "r", encoding="utf-8") as f:
+            calib_items = [json.loads(line) for line in f if line.strip()][:16]
+
+        needs_calib = primary_recipe.default.act is not None or primary_recipe.smooth not in ("none", None)
+        calib_stats = (
+            calibrate_model(primary_model, tokenizer, calib_items, batch_size=4, device=device)
+            if needs_calib
+            else None
+        )
+        apply_recipe(primary_model, primary_recipe, calib_stats=calib_stats)
+        primary_gen_hf = HuggingFaceToolGenerator(primary_model, tokenizer, device=device)
+
+        fallback_gen_hf = None
+        if args.fallback_recipe and args.fallback_recipe.lower() != "none":
+            if args.fallback_recipe not in registry:
+                raise KeyError(f"Unknown fallback recipe {args.fallback_recipe!r}")
+            fb_recipe = registry[args.fallback_recipe]
+            fb_model, _ = _load_model_and_tokenizer(args.model, device)
+            apply_recipe(fb_model, fb_recipe, calib_stats=calib_stats)
+            fallback_gen_hf = HuggingFaceToolGenerator(fb_model, tokenizer, device=device)
+
+        agent = ReliableToolAgent(
+            env=env,
+            primary_generator=primary_gen_hf,
+            fallback_generator=fallback_gen_hf,
+            enable_grammar_retry=not args.no_grammar_retry,
+        )
+
+    result = agent.run_turn(messages=messages, tools=tools, execute_tool=True)
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0 if result.ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qea",
-        description="qnn-edge-agent CLI: quantization pipeline, 4-tier evaluation, and diagnostics.",
+        description="qnn-edge-agent CLI: quantization pipeline, 4-tier evaluation, diagnostics, and reliable agent runtime.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -465,6 +553,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_diag.add_argument("--results-dir", type=str, default=None, help="Directory containing recipe JSON results")
     p_diag.add_argument("--eval-file", type=str, default=None, help="Path to eval_tool_calls.jsonl")
     p_diag.set_defaults(func=cmd_diagnose)
+
+    p_ag = sub.add_parser("agent", help="Run a local PC/IoT tool-calling turn with validate-retry-fallback reliability.")
+    p_ag.add_argument("--prompt", type=str, default=None, help="User prompt (overrides --item-id)")
+    p_ag.add_argument("--item-id", type=str, default="iot_eval_00", help="Item ID from data/iot_items.json")
+    p_ag.add_argument("--recipe", type=str, default="E4s", help="Primary quantized recipe ID")
+    p_ag.add_argument("--fallback-recipe", type=str, default="E1", help="Fallback recipe ID (e.g. E1 or 'none')")
+    p_ag.add_argument("--no-grammar-retry", action="store_true", help="Disable grammar-constrained retry stage")
+    p_ag.add_argument("--workspace-dir", type=str, default=None, help="Sandboxed workspace directory for PC tools")
+    p_ag.add_argument("--model", type=str, default=MODEL_ID, help="Hugging Face model ID")
+    p_ag.add_argument("--config", type=str, default=None, help="Path to experiments.yaml")
+    p_ag.add_argument("--device", type=str, default=None, help="Execution device")
+    p_ag.add_argument("--offline-demo", action="store_true", help="Run deterministic offline reliability demo")
+    p_ag.add_argument(
+        "--simulate-fault",
+        type=str,
+        choices=["none", "corrupted_json", "wrong_schema"],
+        default="none",
+        help="Simulate a quantization fault in --offline-demo mode to demonstrate recovery",
+    )
+    p_ag.set_defaults(func=cmd_agent)
 
     return parser
 
