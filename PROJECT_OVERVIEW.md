@@ -118,12 +118,12 @@ Running [`profile_outliers.py`](scripts/profile_outliers.py) over all 128 calibr
   - Run `E0, E1, E2, E2a, E2b, E4, E4s` across all 460 items on Colab GPU ([`colab_runner.ipynb`](notebooks/colab_runner.ipynb)).
 - **Phase 1 (Quantization Engine & CLI — Completed):**
   - 3-boundary SmoothQuant ([`smooth.py`](src/qnn_edge_agent/quant/smooth.py)), config-driven [`apply_recipe`](src/qnn_edge_agent/quant/fake_quant.py), and `qea` CLI ([`cli.py`](src/qnn_edge_agent/cli.py)).
-- **Phase 2 (Local PC & IoT Agent Runtime):**
-  - Implement `qea agent` with sandboxed PC workspace executors (`local_file_search`, `git_diff_status`, `sqlite_query`, `process_monitor`, `calendar_schedule`, `system_clipboard`) and deterministic in-process IoT simulators (`mqtt_publish`, `gpio_set`, `set_telemetry_threshold`, `ble_scan`, `thermal_throttle`, `camera_capture`).
-- **Phase 3 (Runtime Reliability Layer):**
-  - Add validate -> grammar-constrained retry -> `W8A8` fallback recovery loop with structured telemetry (recovery path, fallback rate, added latency).
-- **Phase 4 (Documentation & Portfolio Polish):**
-  - Write production `README.md` with CLI walkthrough, architecture diagram, and engineering trade-off & debugging write-up.
+- **Phase 2 (Local PC & IoT Agent Runtime — Completed):**
+  - Implemented [`EdgeToolEnvironment`](src/qnn_edge_agent/agent/tools.py) with 6 sandboxed PC workspace executors (`local_file_search`, `git_diff_status`, `sqlite_query`, `process_monitor`, `calendar_schedule`, `system_clipboard`) and 6 deterministic in-process IoT simulators (`mqtt_publish`, `gpio_set`, `set_telemetry_threshold`, `ble_scan`, `thermal_throttle`, `camera_capture`).
+- **Phase 3 (Runtime Reliability Layer — Completed):**
+  - Added [`ReliableToolAgent`](src/qnn_edge_agent/agent/reliability.py) implementing the validate -> grammar-constrained retry -> `W8A8` fallback recovery loop and wired `qea agent` into [`cli.py`](src/qnn_edge_agent/cli.py).
+- **Phase 4 (Documentation & Portfolio Polish — Completed):**
+  - Added production [`README.md`](README.md) with CLI walkthrough, architecture diagram, and engineering trade-off & debugging write-up.
 
 ---
 
