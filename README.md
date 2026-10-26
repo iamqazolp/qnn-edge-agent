@@ -199,6 +199,9 @@ qea diagnose --results-dir results
 qea agent --item-id iot_eval_00 --offline-demo
 qea agent --item-id iot_eval_00 --offline-demo --simulate-fault corrupted_json
 qea agent --item-id iot_eval_00 --offline-demo --simulate-fault wrong_schema
+
+# 6. Launch the mobile/web Live Edge Console (open http://<LAN-IP>:8080 on your phone)
+qea serve --port 8080
 ```
 
 ---
@@ -223,7 +226,7 @@ To verify that our PyTorch/ONNX quantization simulation accurately predicts real
 ## 7. Testing & Reproducing Visual Assets
 
 ```bash
-# Run all 59 unit tests
+# Run all 61 unit tests
 pytest
 
 # Run linter

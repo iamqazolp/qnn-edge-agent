@@ -17,6 +17,11 @@ from qnn_edge_agent.agent.reliability import (
     HuggingFaceToolGenerator,
     ReliableToolAgent,
 )
+from qnn_edge_agent.agent.server import (
+    EdgeConsoleService,
+    create_http_server,
+    get_lan_ip,
+)
 from qnn_edge_agent.agent.tools import EdgeToolEnvironment, load_edge_tool_schemas
 from qnn_edge_agent.env import MODEL_ID, REPO_ROOT
 from qnn_edge_agent.eval.perplexity import evaluate_wikitext2_perplexity
@@ -510,6 +515,23 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    ws_dir = Path(args.workspace_dir) if args.workspace_dir else None
+    svc = EdgeConsoleService(workspace_dir=ws_dir)
+    server = create_http_server(host=args.host, port=args.port, service=svc)
+    lan_ip = get_lan_ip()
+    print("qnn-edge-agent Mobile/Web Edge Console listening on:")
+    print(f"  Local:   http://127.0.0.1:{args.port}")
+    print(f"  Phone:   http://{lan_ip}:{args.port}  (open on your Xiaomi 14 Pro over Wi-Fi)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qea",
@@ -573,6 +595,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Simulate a quantization fault in --offline-demo mode to demonstrate recovery",
     )
     p_ag.set_defaults(func=cmd_agent)
+
+    p_srv = sub.add_parser("serve", help="Launch mobile/web Edge Console for live phone or browser demos.")
+    p_srv.add_argument("--host", type=str, default="0.0.0.0", help="Bind address (default 0.0.0.0 for LAN/phone access)")
+    p_srv.add_argument("--port", type=int, default=8080, help="HTTP port (default 8080)")
+    p_srv.add_argument("--workspace-dir", type=str, default=None, help="Sandboxed workspace directory")
+    p_srv.set_defaults(func=cmd_serve)
 
     return parser
 
