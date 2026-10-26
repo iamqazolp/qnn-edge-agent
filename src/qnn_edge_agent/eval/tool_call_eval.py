@@ -297,6 +297,49 @@ def compute_eval_scores(outcomes: list[ItemOutcome]) -> EvalScores:
     )
 
 
+_TYPE_ALIASES: dict[str, str] = {
+    "dict": "object",
+    "float": "number",
+    "int": "integer",
+    "str": "string",
+    "bool": "boolean",
+    "tuple": "array",
+    "list": "array",
+    "any": "string",
+}
+
+
+def sanitize_schema_for_enforcer(schema: dict[str, Any]) -> dict[str, Any]:
+    """Ensure every JSON Schema node has a valid type for lm-format-enforcer's JsonSchemaParser."""
+    if not isinstance(schema, dict):
+        return {"type": "string"}
+
+    out: dict[str, Any] = dict(schema)
+    raw_type = out.get("type")
+    if isinstance(raw_type, str) and raw_type.lower() in _TYPE_ALIASES:
+        out["type"] = _TYPE_ALIASES[raw_type.lower()]
+    elif raw_type is None and not any(
+        k in out for k in ("anyOf", "oneOf", "allOf", "enum", "const")
+    ):
+        if "properties" in out:
+            out["type"] = "object"
+        elif "items" in out:
+            out["type"] = "array"
+        else:
+            out["type"] = "string"
+
+    if "properties" in out and isinstance(out["properties"], dict):
+        out["properties"] = {
+            k: sanitize_schema_for_enforcer(v) if isinstance(v, dict) else {"type": "string"}
+            for k, v in out["properties"].items()
+        }
+
+    if "items" in out and isinstance(out["items"], dict):
+        out["items"] = sanitize_schema_for_enforcer(out["items"])
+
+    return out
+
+
 def build_constrained_enforcer(
     tools: list[dict[str, Any]],
     tokenizer_data: TokenEnforcerTokenizerData,
@@ -305,7 +348,8 @@ def build_constrained_enforcer(
     for t in tools:
         fn = t.get("function", t)
         fn_name = fn["name"]
-        fn_params = fn.get("parameters", {"type": "object", "properties": {}})
+        raw_params = fn.get("parameters", {"type": "object", "properties": {}})
+        fn_params = sanitize_schema_for_enforcer(raw_params)
         anyof_branches.append(
             {
                 "type": "object",

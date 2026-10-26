@@ -1,10 +1,13 @@
 import json
 
+from lmformatenforcer import JsonSchemaParser, SequenceParser, StringParser
+
 from qnn_edge_agent.env import REPO_ROOT
 from qnn_edge_agent.eval.tool_call_eval import (
     _normalize_accepted_list,
     compute_eval_scores,
     parse_tool_call,
+    sanitize_schema_for_enforcer,
     score_item_output,
 )
 from qnn_edge_agent.types import ItemOutcome
@@ -260,3 +263,37 @@ def test_all_460_eval_items_score_exact_on_ground_truth():
         assert outcome.json_valid, f"{it['id']} failed json_valid"
         assert outcome.tool_correct, f"{it['id']} failed tool_correct"
         assert outcome.values_exact, f"{it['id']} failed values_exact"
+
+
+def test_sanitize_schema_for_enforcer_handles_untyped_bfcl_random_forest():
+    eval_path = REPO_ROOT / "data" / "eval_tool_calls.jsonl"
+    items = [json.loads(line) for line in eval_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rf_item = next(it for it in items if it["id"] == "eval_simple_109")
+
+    fn = rf_item["tools"][0]["function"]
+    sanitized = sanitize_schema_for_enforcer(fn["parameters"])
+    assert sanitized["properties"]["data"]["type"] == "string"
+
+    schema = {
+        "type": "object",
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"const": fn["name"]},
+                    "arguments": sanitized,
+                },
+                "required": ["name", "arguments"],
+            }
+        ],
+    }
+    parser = SequenceParser(
+        [
+            StringParser("<tool_call>\n"),
+            JsonSchemaParser(schema),
+            StringParser("\n</tool_call>"),
+        ]
+    )
+    sample = '<tool_call>\n{"name": "random_forest.train", "arguments": {"n_estimators": 100, "max_depth": 5, "data": "my_data"}}\n</tool_call>'
+    for ch in sample:
+        parser = parser.add_character(ch)
