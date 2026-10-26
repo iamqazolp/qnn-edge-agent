@@ -1,4 +1,8 @@
+import json
+
+from qnn_edge_agent.env import REPO_ROOT
 from qnn_edge_agent.eval.tool_call_eval import (
+    _normalize_accepted_list,
     compute_eval_scores,
     parse_tool_call,
     score_item_output,
@@ -213,3 +217,46 @@ def test_parse_tool_call_plain_and_tags():
     assert parse_tool_call('<tool_call>\n{"name": "f", "arguments": {}}\n</tool_call>')[0]
     assert not parse_tool_call("No JSON here")[0]
     assert not parse_tool_call('{"name": "f"}')[0]
+
+
+def _unwrap_canonical_value(val, prop_schema=None):
+    choices = _normalize_accepted_list(val, prop_schema)
+    non_empty = [c for c in choices if c != "" and c is not None]
+    picked = non_empty[0] if non_empty else (choices[0] if choices else None)
+    if isinstance(picked, dict):
+        sub_props = (prop_schema or {}).get("properties", {})
+        return {
+            k: _unwrap_canonical_value(v, sub_props.get(k))
+            for k, v in picked.items()
+            if _unwrap_canonical_value(v, sub_props.get(k)) not in ("", None)
+        }
+    return picked
+
+
+def test_all_460_eval_items_score_exact_on_ground_truth():
+    eval_path = REPO_ROOT / "data" / "eval_tool_calls.jsonl"
+    items = [json.loads(line) for line in eval_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(items) == 460
+
+    for it in items:
+        gt = it["ground_truth"]
+        gt_name = gt["name"]
+        tool_schema = None
+        for t in it.get("tools", []):
+            fn = t.get("function", t)
+            if fn.get("name") == gt_name:
+                tool_schema = fn.get("parameters", {})
+                break
+        props = (tool_schema or {}).get("properties", {})
+
+        canonical_args = {}
+        for k, raw_val in gt["args"].items():
+            val = _unwrap_canonical_value(raw_val, props.get(k))
+            if val is not None and val != "":
+                canonical_args[k] = val
+
+        raw_output = f"<tool_call>\n{json.dumps({'name': gt_name, 'arguments': canonical_args})}\n</tool_call>"
+        outcome = score_item_output(it, raw_output)
+        assert outcome.json_valid, f"{it['id']} failed json_valid"
+        assert outcome.tool_correct, f"{it['id']} failed tool_correct"
+        assert outcome.values_exact, f"{it['id']} failed values_exact"

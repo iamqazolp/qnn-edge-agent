@@ -59,11 +59,20 @@ def match_single_value(actual: Any, accepted: Any) -> bool:
         return all(match_single_value(a, b) for a, b in zip(actual, accepted))
 
     if isinstance(actual, dict) and isinstance(accepted, dict):
-        if set(actual.keys()) != set(accepted.keys()):
+        if not all(k in accepted for k in actual.keys()):
             return False
-        return all(
-            match_single_value(actual[k], accepted[k]) for k in actual
-        )
+        for k, acc_val in accepted.items():
+            acc_choices = acc_val if isinstance(acc_val, list) else [acc_val]
+            if k not in actual:
+                if "" in acc_choices or None in acc_choices:
+                    continue
+                return False
+            if not (
+                match_single_value(actual[k], acc_val)
+                or any(match_single_value(actual[k], c) for c in acc_choices)
+            ):
+                return False
+        return True
 
     return actual == accepted
 
@@ -153,6 +162,18 @@ def parse_tool_call(raw: str) -> tuple[bool, str | None, dict | None]:
     return True, name, arguments
 
 
+def _normalize_accepted_list(
+    accepted_raw: Any,
+    prop_schema: dict[str, Any] | None = None,
+) -> list[Any]:
+    if not isinstance(accepted_raw, list):
+        return [accepted_raw]
+    prop_type = (prop_schema or {}).get("type")
+    if prop_type == "array" and all(not isinstance(x, list) for x in accepted_raw):
+        return [accepted_raw]
+    return accepted_raw
+
+
 def score_item_output(item: dict[str, Any], raw_output: str) -> ItemOutcome:
     json_valid, name, arguments = parse_tool_call(raw_output)
 
@@ -160,9 +181,8 @@ def score_item_output(item: dict[str, Any], raw_output: str) -> ItemOutcome:
     gt_name = gt.get("name", "")
     tool_correct = bool(json_valid and name == gt_name)
 
-    args_schema_ok = False
+    tool_schema: dict[str, Any] | None = None
     if tool_correct and isinstance(arguments, dict):
-        tool_schema = None
         for t in item.get("tools", []):
             t_fn = t.get("function", t)
             if t_fn.get("name") == name:
@@ -171,6 +191,8 @@ def score_item_output(item: dict[str, Any], raw_output: str) -> ItemOutcome:
                 )
                 break
 
+    args_schema_ok = False
+    if tool_correct and isinstance(arguments, dict):
         if tool_schema is not None and isinstance(tool_schema, dict):
             required = tool_schema.get("required", [])
             properties = tool_schema.get("properties", {})
@@ -195,7 +217,15 @@ def score_item_output(item: dict[str, Any], raw_output: str) -> ItemOutcome:
 
         all_args_match = True
         if no_hallucinated:
-            for k, accepted_list in gt_args.items():
+            schema_props = (
+                tool_schema.get("properties", {})
+                if isinstance(tool_schema, dict)
+                else {}
+            )
+            for k, accepted_raw in gt_args.items():
+                accepted_list = _normalize_accepted_list(
+                    accepted_raw, schema_props.get(k)
+                )
                 if k not in arguments:
                     if "" in accepted_list or None in accepted_list:
                         continue
@@ -368,12 +398,18 @@ def evaluate_tool_calls(
                     max_new_tokens=max_new_tokens,
                     prefix_allowed_tokens_fn=prefix_fn,
                     do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                    top_k=None,
                 )
             else:
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
                     do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                    top_k=None,
                 )
 
         for j, it in enumerate(batch_items):
