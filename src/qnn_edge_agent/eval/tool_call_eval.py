@@ -1,23 +1,40 @@
+from __future__ import annotations
+
 import json
 import math
 import re
 import string
 from typing import Any
 
-import torch
-import transformers
-import transformers.tokenization_utils
+try:
+    import torch
+    import transformers
+    import transformers.tokenization_utils
 
-if not hasattr(transformers.tokenization_utils, "PreTrainedTokenizerBase"):
-    transformers.tokenization_utils.PreTrainedTokenizerBase = (
-        transformers.PreTrainedTokenizerBase
+    if not hasattr(transformers.tokenization_utils, "PreTrainedTokenizerBase"):
+        transformers.tokenization_utils.PreTrainedTokenizerBase = (
+            transformers.PreTrainedTokenizerBase
+        )
+
+    from lmformatenforcer import (
+        JsonSchemaParser,
+        SequenceParser,
+        StringParser,
+        TokenEnforcer,
     )
-
-from lmformatenforcer import JsonSchemaParser, SequenceParser, StringParser, TokenEnforcer
-from lmformatenforcer.integrations.transformers import (
-    TokenEnforcerTokenizerData,
-    build_token_enforcer_tokenizer_data,
-)
+    from lmformatenforcer.integrations.transformers import (
+        TokenEnforcerTokenizerData,
+        build_token_enforcer_tokenizer_data,
+    )
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    transformers = None  # type: ignore[assignment]
+    JsonSchemaParser = None  # type: ignore[assignment,misc]
+    SequenceParser = None  # type: ignore[assignment,misc]
+    StringParser = None  # type: ignore[assignment,misc]
+    TokenEnforcer = Any  # type: ignore[assignment,misc]
+    TokenEnforcerTokenizerData = Any  # type: ignore[assignment,misc]
+    build_token_enforcer_tokenizer_data = None  # type: ignore[assignment]
 
 from qnn_edge_agent.eval.stats import wilson_ci
 from qnn_edge_agent.types import EvalMode, EvalScores, ItemOutcome

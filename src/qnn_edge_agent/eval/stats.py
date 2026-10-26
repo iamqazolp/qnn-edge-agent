@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass
+from statistics import NormalDist
 from typing import Sequence
-
-from scipy import stats
 
 from qnn_edge_agent.types import TierScore
 
@@ -20,15 +21,15 @@ def wilson_ci(k: int, n: int, confidence: float = 0.95) -> TierScore:
         return TierScore(rate=0.0, ci_low=0.0, ci_high=0.0, n=0)
 
     p = k / n
-    z = float(stats.norm.ppf(1.0 - (1.0 - confidence) / 2.0))
+    z = float(NormalDist().inv_cdf(1.0 - (1.0 - confidence) / 2.0))
     denom = 1.0 + (z**2) / n
     center = (p + (z**2) / (2.0 * n)) / denom
     margin = (z / denom) * math.sqrt(
         (p * (1.0 - p)) / n + (z**2) / (4.0 * (n**2))
     )
 
-    ci_low = max(0.0, float(center - margin))
-    ci_high = min(1.0, float(center + margin))
+    ci_low = 0.0 if k == 0 else max(0.0, float(center - margin))
+    ci_high = 1.0 if k == n else min(1.0, float(center + margin))
     return TierScore(rate=p, ci_low=ci_low, ci_high=ci_high, n=n)
 
 
@@ -53,10 +54,12 @@ def mcnemar_exact(
     if n_discordant == 0:
         return McNemarResult(b=b, c=c, n_discordant=0, p_value=1.0)
 
-    res = stats.binomtest(b, n=n_discordant, p=0.5, alternative="two-sided")
+    k_tail = min(b, c)
+    cdf_tail = sum(math.comb(n_discordant, i) for i in range(k_tail + 1)) / (2.0**n_discordant)
+    p_val = min(1.0, 2.0 * cdf_tail)
     return McNemarResult(
         b=b,
         c=c,
         n_discordant=n_discordant,
-        p_value=float(res.pvalue),
+        p_value=float(p_val),
     )

@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore[assignment]
 
 try:
     import torch
@@ -63,11 +66,111 @@ IOT_TOOL_NAMES: frozenset[str] = frozenset({
     "camera_capture",
 })
 
+_DEFAULT_EXPERIMENTS: dict[str, dict[str, Any]] = {
+    "E0": {
+        "id": "E0",
+        "smooth": "none",
+        "alpha": None,
+        "default": {"weight": None, "act": None, "adaround": False},
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E1": {
+        "id": "E1",
+        "smooth": "none",
+        "alpha": None,
+        "default": {
+            "weight": {"bits": 8, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E2": {
+        "id": "E2",
+        "smooth": "none",
+        "alpha": None,
+        "default": {
+            "weight": {"bits": 4, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E2a": {
+        "id": "E2a",
+        "smooth": "none",
+        "alpha": None,
+        "default": {
+            "weight": {"bits": 4, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 16, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E2b": {
+        "id": "E2b",
+        "smooth": "none",
+        "alpha": None,
+        "default": {
+            "weight": None,
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E4": {
+        "id": "E4",
+        "smooth": "ABC",
+        "alpha": 0.5,
+        "default": {
+            "weight": {"bits": 4, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E4s": {
+        "id": "E4s",
+        "smooth": "ABC",
+        "alpha": "search",
+        "default": {
+            "weight": {"bits": 4, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+}
+
 
 def load_recipe_registry(config_path: Path | None = None) -> dict[str, Recipe]:
     path = config_path or (REPO_ROOT / "configs" / "experiments.yaml")
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)["experiments"]
+    if yaml is not None and path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f)["experiments"]
+    else:
+        raw = _DEFAULT_EXPERIMENTS
 
     registry: dict[str, Recipe] = {}
     for rid, d in raw.items():
