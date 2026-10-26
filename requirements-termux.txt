@@ -1,0 +1,6 @@
+# Lightweight pure-Python requirements for Android Termux (installs in ~2 seconds without C++/Rust/Fortran compilation)
+# Usage on Termux:
+#   pip install -r requirements-termux.txt
+#   pip install --no-deps -e .
+pyyaml>=6.0
+python-dotenv>=1.0

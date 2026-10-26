@@ -4,7 +4,10 @@ import dataclasses
 import time
 from typing import Any, Callable
 
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore[assignment]
 
 from qnn_edge_agent.agent.tools import (
     EdgeToolEnvironment,
@@ -18,8 +21,14 @@ from qnn_edge_agent.eval.tool_call_eval import (
     build_token_enforcer_tokenizer_data,
     parse_tool_call,
 )
-from qnn_edge_agent.quant.calibrate import CalibStats
-from qnn_edge_agent.quant.fake_quant import attach_activation_hooks
+
+try:
+    from qnn_edge_agent.quant.calibrate import CalibStats
+    from qnn_edge_agent.quant.fake_quant import attach_activation_hooks
+except ImportError:
+    CalibStats = Any  # type: ignore[assignment,misc]
+    attach_activation_hooks = None  # type: ignore[assignment]
+
 from qnn_edge_agent.types import EvalMode
 
 GeneratorFn = Callable[[list[dict[str, Any]], list[dict[str, Any]], EvalMode], str]
@@ -60,7 +69,7 @@ class HuggingFaceToolGenerator:
         self,
         model: Any,
         tokenizer: Any,
-        device: str | torch.device = "cpu",
+        device: str | Any = "cpu",
         max_new_tokens: int = 256,
     ) -> None:
         self.model = model
@@ -99,7 +108,7 @@ class HuggingFaceToolGenerator:
                 enforcer = build_constrained_enforcer(tools, self._get_tokenizer_data())
                 eos_id = self.tokenizer.eos_token_id
 
-                def prefix_fn(batch_id: int, sent: torch.Tensor) -> list[int]:
+                def prefix_fn(batch_id: int, sent: Any) -> list[int]:
                     sent_list = sent.tolist()
                     if eos_id is not None and eos_id in sent_list[input_len:]:
                         return [eos_id]
@@ -140,7 +149,7 @@ class InPlaceW4A16FallbackGenerator:
     def __init__(
         self,
         primary_generator: HuggingFaceToolGenerator,
-        hook_handles: list[torch.utils.hooks.RemovableHandle],
+        hook_handles: list[Any],
         active_calib: CalibStats | dict[str, Any] | None = None,
         primary_act_bits: int = 8,
         fallback_act_bits: int = 16,
