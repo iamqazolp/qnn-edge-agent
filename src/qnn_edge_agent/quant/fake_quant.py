@@ -17,6 +17,74 @@ from qnn_edge_agent.quant.smooth import apply_smoothquant
 from qnn_edge_agent.types import Recipe
 
 
+def _collect_decoder_linears(model: PreTrainedModel | nn.Module) -> list[tuple[str, nn.Linear]]:
+    layers = getattr(getattr(model, "model", model), "layers", None)
+    decoder_linears: list[tuple[str, nn.Linear]] = []
+    if layers is not None:
+        for i, layer in enumerate(layers):
+            for proj_name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                mod = getattr(layer.self_attn, proj_name, None)
+                if isinstance(mod, nn.Linear):
+                    decoder_linears.append((f"model.layers.{i}.self_attn.{proj_name}", mod))
+            for proj_name in ("gate_proj", "up_proj", "down_proj"):
+                mod = getattr(layer.mlp, proj_name, None)
+                if isinstance(mod, nn.Linear):
+                    decoder_linears.append((f"model.layers.{i}.mlp.{proj_name}", mod))
+    else:
+        for name, mod in model.named_modules():
+            if isinstance(mod, nn.Linear) and "layers." in name:
+                decoder_linears.append((name, mod))
+    return decoder_linears
+
+
+def attach_activation_hooks(
+    model: PreTrainedModel | nn.Module,
+    act_bits: int,
+    active_calib: CalibStats | dict[str, Any] | None = None,
+) -> list[torch.utils.hooks.RemovableHandle]:
+    """Attach per-tensor asymmetric activation fake-quantization pre-hooks for act_bits (8 or 16)."""
+    hook_handles: list[torch.utils.hooks.RemovableHandle] = []
+    decoder_linears = _collect_decoder_linears(model)
+
+    for name, module in decoder_linears:
+        scale: float | None = None
+        zp: int | None = None
+
+        if active_calib is not None:
+            if isinstance(active_calib, CalibStats):
+                act_ranges = active_calib.ranges_for_bits(act_bits)
+            elif isinstance(active_calib, dict):
+                minmax = active_calib.get("act_minmax") if act_bits >= 16 else None
+                act_ranges = minmax or active_calib.get("act_ranges", {})
+            else:
+                act_ranges = {}
+
+            if name in act_ranges:
+                rmin, rmax = act_ranges[name]
+                scale, zp = quantize_asymmetric_per_tensor(
+                    rmin=rmin, rmax=rmax, bits=act_bits
+                )
+
+        def make_act_hook(s: float | None, z: int | None, b: int):
+            def hook(mod: nn.Module, args: tuple[torch.Tensor, ...]):
+                if len(args) == 0:
+                    return args
+                x = args[0]
+                if s is not None and z is not None:
+                    x_dq = fake_quant_act_asymmetric(x, scale=s, zp=z, bits=b)
+                else:
+                    s_dyn, z_dyn = quantize_asymmetric_per_tensor(x, bits=b)
+                    x_dq = fake_quant_act_asymmetric(x, scale=s_dyn, zp=z_dyn, bits=b)
+                return (x_dq,) + args[1:]
+
+            return hook
+
+        h = module.register_forward_pre_hook(make_act_hook(scale, zp, act_bits))
+        hook_handles.append(h)
+
+    return hook_handles
+
+
 def apply_recipe(
     model: PreTrainedModel | nn.Module,
     recipe: Recipe,
@@ -52,6 +120,7 @@ def apply_recipe(
             "footprint_mb": footprint,
             "hook_handles": hook_handles,
             "chosen_alphas": {},
+            "active_calib": calib_stats,
         }
 
     chosen_alphas: dict[str, float] = {}
@@ -74,22 +143,7 @@ def apply_recipe(
             act_bits=a_bits_hint,
         )
 
-    layers = getattr(getattr(model, "model", model), "layers", None)
-    decoder_linears: list[tuple[str, nn.Linear]] = []
-    if layers is not None:
-        for i, layer in enumerate(layers):
-            for proj_name in ("q_proj", "k_proj", "v_proj", "o_proj"):
-                mod = getattr(layer.self_attn, proj_name, None)
-                if isinstance(mod, nn.Linear):
-                    decoder_linears.append((f"model.layers.{i}.self_attn.{proj_name}", mod))
-            for proj_name in ("gate_proj", "up_proj", "down_proj"):
-                mod = getattr(layer.mlp, proj_name, None)
-                if isinstance(mod, nn.Linear):
-                    decoder_linears.append((f"model.layers.{i}.mlp.{proj_name}", mod))
-    else:
-        for name, mod in model.named_modules():
-            if isinstance(mod, nn.Linear) and "layers." in name:
-                decoder_linears.append((name, mod))
+    decoder_linears = _collect_decoder_linears(model)
 
     for name, module in decoder_linears:
         if layer_bits_map is not None and name in layer_bits_map:
@@ -117,43 +171,11 @@ def apply_recipe(
 
     act_format = recipe.default.act
     if act_format is not None and act_format.bits in (8, 16):
-        act_bits = act_format.bits
-
-        for name, module in decoder_linears:
-            scale: float | None = None
-            zp: int | None = None
-
-            if active_calib is not None:
-                if isinstance(active_calib, CalibStats):
-                    act_ranges = active_calib.ranges_for_bits(act_bits)
-                elif isinstance(active_calib, dict):
-                    minmax = active_calib.get("act_minmax") if act_bits >= 16 else None
-                    act_ranges = minmax or active_calib.get("act_ranges", {})
-                else:
-                    act_ranges = {}
-
-                if name in act_ranges:
-                    rmin, rmax = act_ranges[name]
-                    scale, zp = quantize_asymmetric_per_tensor(
-                        rmin=rmin, rmax=rmax, bits=act_bits
-                    )
-
-            def make_act_hook(s: float | None, z: int | None, b: int):
-                def hook(mod: nn.Module, args: tuple[torch.Tensor, ...]):
-                    if len(args) == 0:
-                        return args
-                    x = args[0]
-                    if s is not None and z is not None:
-                        x_dq = fake_quant_act_asymmetric(x, scale=s, zp=z, bits=b)
-                    else:
-                        s_dyn, z_dyn = quantize_asymmetric_per_tensor(x, bits=b)
-                        x_dq = fake_quant_act_asymmetric(x, scale=s_dyn, zp=z_dyn, bits=b)
-                    return (x_dq,) + args[1:]
-
-                return hook
-
-            h = module.register_forward_pre_hook(make_act_hook(scale, zp, act_bits))
-            hook_handles.append(h)
+        hook_handles = attach_activation_hooks(
+            model=model,
+            act_bits=act_format.bits,
+            active_calib=active_calib,
+        )
 
     eff_layer_bits: Any = None
     if layer_bits_map is not None:
@@ -170,4 +192,5 @@ def apply_recipe(
         "footprint_mb": footprint,
         "hook_handles": hook_handles,
         "chosen_alphas": chosen_alphas,
+        "active_calib": active_calib,
     }

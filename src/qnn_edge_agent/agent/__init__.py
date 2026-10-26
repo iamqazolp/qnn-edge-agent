@@ -2,6 +2,7 @@ from qnn_edge_agent.agent.reliability import (
     AgentTurnResult,
     AttemptRecord,
     HuggingFaceToolGenerator,
+    InPlaceW4A16FallbackGenerator,
     ReliableToolAgent,
 )
 from qnn_edge_agent.agent.server import (
@@ -23,6 +24,7 @@ __all__ = [
     "EdgeConsoleService",
     "EdgeToolEnvironment",
     "HuggingFaceToolGenerator",
+    "InPlaceW4A16FallbackGenerator",
     "ReliableToolAgent",
     "ToolExecutionResult",
     "create_http_server",

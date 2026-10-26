@@ -15,6 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from qnn_edge_agent.agent.reliability import (
     HuggingFaceToolGenerator,
+    InPlaceW4A16FallbackGenerator,
     ReliableToolAgent,
 )
 from qnn_edge_agent.agent.server import (
@@ -491,23 +492,42 @@ def cmd_agent(args: argparse.Namespace) -> int:
             if needs_calib
             else None
         )
-        apply_recipe(primary_model, primary_recipe, calib_stats=calib_stats)
+        primary_info = apply_recipe(primary_model, primary_recipe, calib_stats=calib_stats)
         primary_gen_hf = HuggingFaceToolGenerator(primary_model, tokenizer, device=device)
 
-        fallback_gen_hf = None
+        fallback_gen_hf: Any = None
+        fallback_overhead_mb = 0.0
         if args.fallback_recipe and args.fallback_recipe.lower() != "none":
             if args.fallback_recipe not in registry:
                 raise KeyError(f"Unknown fallback recipe {args.fallback_recipe!r}")
             fb_recipe = registry[args.fallback_recipe]
-            fb_model, _ = _load_model_and_tokenizer(args.model, device)
-            apply_recipe(fb_model, fb_recipe, calib_stats=calib_stats)
-            fallback_gen_hf = HuggingFaceToolGenerator(fb_model, tokenizer, device=device)
+            can_promote_inplace = (
+                primary_recipe.default.weight is not None
+                and fb_recipe.default.weight is not None
+                and primary_recipe.default.weight.bits == fb_recipe.default.weight.bits
+                and fb_recipe.default.act is not None
+                and fb_recipe.default.act.bits == 16
+            )
+            if can_promote_inplace:
+                fallback_gen_hf = InPlaceW4A16FallbackGenerator(
+                    primary_generator=primary_gen_hf,
+                    hook_handles=primary_info["hook_handles"],
+                    active_calib=primary_info.get("active_calib", calib_stats),
+                    primary_act_bits=primary_recipe.default.act.bits if primary_recipe.default.act else 8,
+                    fallback_act_bits=16,
+                )
+            else:
+                fb_model, _ = _load_model_and_tokenizer(args.model, device)
+                fb_info = apply_recipe(fb_model, fb_recipe, calib_stats=calib_stats)
+                fallback_gen_hf = HuggingFaceToolGenerator(fb_model, tokenizer, device=device)
+                fallback_overhead_mb = float(fb_info["footprint_mb"])
 
         agent = ReliableToolAgent(
             env=env,
             primary_generator=primary_gen_hf,
             fallback_generator=fallback_gen_hf,
             enable_grammar_retry=not args.no_grammar_retry,
+            fallback_memory_overhead_mb=fallback_overhead_mb,
         )
 
     result = agent.run_turn(messages=messages, tools=tools, execute_tool=True)
@@ -580,7 +600,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ag.add_argument("--prompt", type=str, default=None, help="User prompt (overrides --item-id)")
     p_ag.add_argument("--item-id", type=str, default="iot_eval_00", help="Item ID from data/iot_items.json")
     p_ag.add_argument("--recipe", type=str, default="E4s", help="Primary quantized recipe ID")
-    p_ag.add_argument("--fallback-recipe", type=str, default="E1", help="Fallback recipe ID (e.g. E1 or 'none')")
+    p_ag.add_argument(
+        "--fallback-recipe",
+        type=str,
+        default="E2a",
+        help="Fallback recipe ID (default E2a for zero-RAM in-place W4A16 promotion, E1 for W8A8, or 'none')",
+    )
     p_ag.add_argument("--no-grammar-retry", action="store_true", help="Disable grammar-constrained retry stage")
     p_ag.add_argument("--workspace-dir", type=str, default=None, help="Sandboxed workspace directory for PC tools")
     p_ag.add_argument("--model", type=str, default=MODEL_ID, help="Hugging Face model ID")

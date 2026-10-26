@@ -18,6 +18,8 @@ from qnn_edge_agent.eval.tool_call_eval import (
     build_token_enforcer_tokenizer_data,
     parse_tool_call,
 )
+from qnn_edge_agent.quant.calibrate import CalibStats
+from qnn_edge_agent.quant.fake_quant import attach_activation_hooks
 from qnn_edge_agent.types import EvalMode
 
 GeneratorFn = Callable[[list[dict[str, Any]], list[dict[str, Any]], EvalMode], str]
@@ -45,6 +47,7 @@ class AgentTurnResult:
     execution: ToolExecutionResult | None
     attempts: list[AttemptRecord]
     total_latency_ms: float
+    fallback_memory_overhead_mb: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -107,16 +110,74 @@ class HuggingFaceToolGenerator:
                     max_new_tokens=self.max_new_tokens,
                     prefix_allowed_tokens_fn=prefix_fn,
                     do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                    top_k=None,
                 )
             else:
                 outputs = self.model.generate(
                     **inputs,
                     max_new_tokens=self.max_new_tokens,
                     do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                    top_k=None,
                 )
 
         gen_tokens = outputs[0][input_len:]
         return str(self.tokenizer.decode(gen_tokens, skip_special_tokens=False))
+
+
+class InPlaceW4A16FallbackGenerator:
+    """
+    Zero-RAM-overhead Tier-3 fallback generator: promotes a live W4A8 model to W4A16 (E2a)
+    in-place by swapping its 8-bit activation pre-hooks to unclipped 16-bit activation hooks
+    for the fallback turn, then restoring 8-bit hooks afterward.
+    """
+
+    memory_overhead_mb: float = 0.0
+
+    def __init__(
+        self,
+        primary_generator: HuggingFaceToolGenerator,
+        hook_handles: list[torch.utils.hooks.RemovableHandle],
+        active_calib: CalibStats | dict[str, Any] | None = None,
+        primary_act_bits: int = 8,
+        fallback_act_bits: int = 16,
+    ) -> None:
+        self.primary_generator = primary_generator
+        self.hook_handles = hook_handles
+        self.active_calib = active_calib
+        self.primary_act_bits = primary_act_bits
+        self.fallback_act_bits = fallback_act_bits
+
+    def __call__(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        mode: EvalMode = "constrained",
+    ) -> str:
+        model = self.primary_generator.model
+        for h in self.hook_handles:
+            h.remove()
+        self.hook_handles.clear()
+
+        a16_handles = attach_activation_hooks(
+            model=model,
+            act_bits=self.fallback_act_bits,
+            active_calib=self.active_calib,
+        )
+        try:
+            return self.primary_generator(messages, tools, mode)
+        finally:
+            for h in a16_handles:
+                h.remove()
+            restored = attach_activation_hooks(
+                model=model,
+                act_bits=self.primary_act_bits,
+                active_calib=self.active_calib,
+            )
+            self.hook_handles.extend(restored)
 
 
 class ReliableToolAgent:
@@ -124,7 +185,7 @@ class ReliableToolAgent:
     3-tier runtime reliability layer for quantized edge tool-calling agents:
       1. Primary model unconstrained decoding -> JSON + schema validation
       2. Primary model grammar-constrained retry (lm-format-enforcer) on syntax/schema fault
-      3. Optional W8A8 (E1) fallback model if primary constrained output still fails validation
+      3. Zero-RAM W4A16 in-place activation promotion (or W8A8 fallback) if still invalid
       4. Sandboxed PC / IoT tool execution via EdgeToolEnvironment
     """
 
@@ -134,11 +195,17 @@ class ReliableToolAgent:
         primary_generator: GeneratorFn,
         fallback_generator: GeneratorFn | None = None,
         enable_grammar_retry: bool = True,
+        fallback_stage_name: str = "fallback_w8a8",
+        fallback_memory_overhead_mb: float = 0.0,
     ) -> None:
         self.env = env
         self.primary_generator = primary_generator
         self.fallback_generator = fallback_generator
         self.enable_grammar_retry = enable_grammar_retry
+        self.fallback_stage_name = fallback_stage_name
+        self.fallback_memory_overhead_mb = float(
+            getattr(fallback_generator, "memory_overhead_mb", fallback_memory_overhead_mb)
+        )
 
     def _validate_candidate(
         self,
@@ -190,7 +257,7 @@ class ReliableToolAgent:
         if self.enable_grammar_retry:
             stages.append(("primary_grammar_retry", self.primary_generator, "constrained"))
         if self.fallback_generator is not None:
-            stages.append(("fallback_w8a8", self.fallback_generator, "constrained"))
+            stages.append((self.fallback_stage_name, self.fallback_generator, "constrained"))
 
         for stage_name, gen_fn, mode in stages:
             t0 = time.perf_counter()
@@ -223,6 +290,7 @@ class ReliableToolAgent:
                     execution=exec_res,
                     attempts=attempts,
                     total_latency_ms=total_ms,
+                    fallback_memory_overhead_mb=self.fallback_memory_overhead_mb,
                 )
 
         total_ms = (time.perf_counter() - t_start) * 1000.0
@@ -234,4 +302,5 @@ class ReliableToolAgent:
             execution=None,
             attempts=attempts,
             total_latency_ms=total_ms,
+            fallback_memory_overhead_mb=self.fallback_memory_overhead_mb,
         )
