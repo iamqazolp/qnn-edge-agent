@@ -182,12 +182,37 @@ def main() -> None:
     with open(calib_path, "r", encoding="utf-8") as f:
         all_calib_items = [json.loads(line) for line in f if line.strip()]
 
+    def resolve_modes(rid: str) -> list[str]:
+        if args.modes is not None:
+            return [m.strip() for m in args.modes.split(",") if m.strip()]
+        return list(exp_registry[rid].get("modes", ["unconstrained"]))
+
+    existing_payloads: dict[str, dict[str, Any]] = {}
+    pending_modes_by_rid: dict[str, list[str]] = {}
     to_run = []
     for rid in recipe_ids:
         target_path = output_dir / f"{rid}.json"
+        req_modes = resolve_modes(rid)
         if target_path.exists() and not args.force:
-            print(f"Skipping {rid} (already exists at {target_path})")
+            try:
+                with open(target_path, "r", encoding="utf-8") as f:
+                    prev = json.load(f)
+                prev_eval = prev.get("eval", {})
+                missing_modes = [
+                    m for m in req_modes if m not in prev_eval or len(prev.get("per_item", {}).get(m, [])) != len(eval_items)
+                ]
+                needs_ppl = not args.skip_ppl and prev.get("wikitext2_ppl") is None
+                if not missing_modes and not needs_ppl:
+                    print(f"Skipping {rid} (already exists at {target_path})")
+                    continue
+                existing_payloads[rid] = prev
+                pending_modes_by_rid[rid] = missing_modes
+                to_run.append(rid)
+            except Exception:
+                pending_modes_by_rid[rid] = req_modes
+                to_run.append(rid)
         else:
+            pending_modes_by_rid[rid] = req_modes
             to_run.append(rid)
 
     if not to_run:
@@ -247,14 +272,11 @@ def main() -> None:
             calib_stats=calib_stats,
         )
 
-        modes: list[str]
-        if args.modes is not None:
-            modes = [m.strip() for m in args.modes.split(",") if m.strip()]
-        else:
-            modes = recipe_dict.get("modes", ["unconstrained"])
+        prev_data = existing_payloads.get(rid, {})
+        modes = pending_modes_by_rid.get(rid, resolve_modes(rid))
 
-        eval_results: dict[str, Any] = {}
-        per_item_results: dict[str, Any] = {}
+        eval_results: dict[str, Any] = dict(prev_data.get("eval", {}))
+        per_item_results: dict[str, Any] = dict(prev_data.get("per_item", {}))
 
         for mode in modes:
             print(f"\n--- Evaluating {rid} under {mode} mode ({len(eval_items)} items) ---")
@@ -277,8 +299,8 @@ def main() -> None:
             print(f"  Args schema ok:  {scores.args_schema_ok.rate * 100:.1f}%")
             print(f"  Exact value:     {scores.values_exact.rate * 100:.1f}%")
 
-        ppl: float | None = None
-        if not args.skip_ppl:
+        ppl: float | None = prev_data.get("wikitext2_ppl")
+        if not args.skip_ppl and ppl is None:
             print(f"\nEvaluating WikiText-2 perplexity for {rid}...")
             ppl = evaluate_wikitext2_perplexity(
                 model=base_model,
