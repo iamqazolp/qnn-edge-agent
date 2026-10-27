@@ -280,3 +280,15 @@ def test_apply_recipe_selects_ranges_by_activation_bits(tiny_qwen_config, as_dic
 
     assert seen["E2"] == pytest.approx(1.0, abs=0.01)  # 8-bit clips the outlier
     assert seen["E2a"] == pytest.approx(40.0, abs=0.01)  # 16-bit preserves it
+
+
+def test_find_best_mse_range_preserves_unaligned_channel_outliers():
+    from qnn_edge_agent.quant.calibrate import find_best_mse_range
+
+    torch.manual_seed(0)
+    # 500 x 896 = 448,000 elements; flat[::8] would skip channel 62 (62 % 8 == 6).
+    samples = torch.randn(500, 896) * 0.5
+    samples[:, 62] = 46.8
+    rmin, rmax = find_best_mse_range(samples, bits=8)
+    assert rmax == pytest.approx(46.8, abs=1e-3)
+    assert rmin <= 0.0
