@@ -79,7 +79,13 @@ def find_best_mse_range(
     global_min = min(float(flat.min().item()), 0.0)
     global_max = max(float(flat.max().item()), 0.0)
 
-    if flat.numel() > 50_000:
+    if samples.ndim >= 2 and flat.numel() > 50_000:
+        width = samples.shape[-1]
+        rows = samples.reshape(-1, width)
+        max_rows = max(1, 50_000 // width)
+        row_step = max(1, rows.shape[0] // max_rows)
+        sub_flat = rows[::row_step][:max_rows].reshape(-1).to(torch.float32)
+    elif flat.numel() > 50_000:
         step = max(1, flat.numel() // 50_000)
         sub_flat = flat[::step][:50_000]
     else:
@@ -296,12 +302,26 @@ def calibrate_model(
     act_ranges: dict[str, tuple[float, float]] = {}
     act_minmax: dict[str, tuple[float, float]] = {}
 
+    group_ref_proj = {
+        "qkv": "self_attn.q_proj",
+        "o": "self_attn.o_proj",
+        "gate_up": "mlp.gate_proj",
+        "down": "mlp.down_proj",
+    }
+
     for i in range(num_layers):
         for gname in ("qkv", "o", "gate_up", "down"):
             gkey = f"model.layers.{i}.{gname}"
             samples = group_samples[gkey]
             if samples:
-                merged = torch.cat(samples, dim=0)
+                ref_proj = f"model.layers.{i}.{group_ref_proj[gname]}"
+                extra_rows = []
+                if ref_proj in act_ch_min and ref_proj in act_ch_max:
+                    extra_rows = [
+                        act_ch_min[ref_proj].cpu().unsqueeze(0),
+                        act_ch_max[ref_proj].cpu().unsqueeze(0),
+                    ]
+                merged = torch.cat(samples + extra_rows, dim=0)
                 best_range = find_best_mse_range(merged, bits=8)
             else:
                 best_range = (-1.0, 1.0)
