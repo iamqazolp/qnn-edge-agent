@@ -324,9 +324,18 @@ def cmd_eval(args: argparse.Namespace) -> int:
             if args.modes
             else (["unconstrained", "constrained"] if rid in ("E0", "E2", "E2a", "E4s") else ["unconstrained"])
         )
-        eval_results: dict[str, Any] = {}
-        per_item: dict[str, Any] = {}
-        scenarios: dict[str, Any] = {}
+        target_path = out_dir / f"{rid}.json"
+        prev_data: dict[str, Any] = {}
+        if target_path.exists():
+            try:
+                with open(target_path, "r", encoding="utf-8") as f:
+                    prev_data = json.load(f)
+            except Exception:
+                prev_data = {}
+
+        eval_results: dict[str, Any] = dict(prev_data.get("eval", {}))
+        per_item: dict[str, Any] = dict(prev_data.get("per_item", {}))
+        scenarios: dict[str, Any] = dict(prev_data.get("scenarios", {}))
 
         for mode in modes:
             t0 = time.time()
@@ -354,7 +363,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 gate_failed = True
 
         ppl = (
-            None
+            prev_data.get("wikitext2_ppl")
             if args.skip_ppl
             else evaluate_wikitext2_perplexity(model, tokenizer, device=device, batch_size=args.batch_size)
         )
@@ -372,7 +381,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
             "scenarios": scenarios,
             "per_item": per_item,
         }
-        with open(out_dir / f"{rid}.json", "w", encoding="utf-8") as f:
+        with open(target_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
 
     return 1 if gate_failed else 0

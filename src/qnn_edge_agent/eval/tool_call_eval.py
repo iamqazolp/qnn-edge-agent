@@ -13,11 +13,18 @@ if not hasattr(transformers.tokenization_utils, "PreTrainedTokenizerBase"):
         transformers.PreTrainedTokenizerBase
     )
 
-from lmformatenforcer import JsonSchemaParser, SequenceParser, StringParser, TokenEnforcer
+from lmformatenforcer import (
+    CharacterLevelParserConfig,
+    JsonSchemaParser,
+    SequenceParser,
+    StringParser,
+    TokenEnforcer,
+)
 from lmformatenforcer.integrations.transformers import (
     TokenEnforcerTokenizerData,
     build_token_enforcer_tokenizer_data,
 )
+from lmformatenforcer.jsonschemaparser import StringParsingState
 
 from qnn_edge_agent.eval.stats import wilson_ci
 from qnn_edge_agent.types import EvalMode, EvalScores, ItemOutcome
@@ -340,6 +347,73 @@ def sanitize_schema_for_enforcer(schema: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+if JsonSchemaParser is not None and SequenceParser is not None:
+
+    class FastJsonSchemaParser(JsonSchemaParser):
+        """JsonSchemaParser with token-mask caching for unconstrained string value states."""
+
+        def cache_key(self) -> Any:
+            if self.object_stack and not self.can_end():
+                curr = self.object_stack[-1]
+                if (
+                    StringParsingState is not None
+                    and isinstance(curr, StringParsingState)
+                    and not curr.allowed_strings
+                    and not curr.regex_parser
+                ):
+                    ancestor_chars = tuple(
+                        p.get_allowed_characters() for p in self.object_stack[:-1]
+                    )
+                    if not curr.seen_opening_quote:
+                        return (
+                            "json_str_start",
+                            self.num_consecutive_whitespaces,
+                            curr.min_length,
+                            curr.max_length,
+                            ancestor_chars,
+                        )
+                    if (
+                        not curr.seen_closing_quote
+                        and not curr.min_length
+                        and not curr.max_length
+                    ):
+                        return ("json_str_body", ancestor_chars)
+            return None
+
+        def add_character(self, new_character: str) -> Any:
+            res = super().add_character(new_character)
+            if isinstance(res, JsonSchemaParser) and not isinstance(
+                res, FastJsonSchemaParser
+            ):
+                res.__class__ = FastJsonSchemaParser
+            return res
+
+    class FastSequenceParser(SequenceParser):
+        """SequenceParser that forwards shortcut_key and cache_key while head parser cannot end."""
+
+        def shortcut_key(self) -> Any:
+            if len(self.parsers) == 1 or not self.parsers[0].can_end():
+                return self.parsers[0].shortcut_key()
+            return None
+
+        def cache_key(self) -> Any:
+            if len(self.parsers) == 1 or not self.parsers[0].can_end():
+                return self.parsers[0].cache_key()
+            return super().cache_key()
+
+        def add_character(self, new_character: str) -> Any:
+            res = super().add_character(new_character)
+            if isinstance(res, SequenceParser) and not isinstance(
+                res, FastSequenceParser
+            ):
+                res.__class__ = FastSequenceParser
+            return res
+
+else:
+    FastJsonSchemaParser = None  # type: ignore[assignment,misc]
+    FastSequenceParser = None  # type: ignore[assignment,misc]
+
+
 def build_constrained_enforcer(
     tools: list[dict[str, Any]],
     tokenizer_data: TokenEnforcerTokenizerData,
@@ -362,14 +436,39 @@ def build_constrained_enforcer(
         )
 
     schema = {"type": "object", "anyOf": anyof_branches}
-    parser = SequenceParser(
+    cfg = None
+    if CharacterLevelParserConfig is not None and hasattr(
+        tokenizer_data, "tokenizer_alphabet"
+    ):
+        cfg = CharacterLevelParserConfig(
+            alphabet=tokenizer_data.tokenizer_alphabet,
+            max_consecutive_whitespaces=2,
+        )
+    json_parser = (
+        FastJsonSchemaParser(schema, config=cfg)
+        if FastJsonSchemaParser is not None
+        else JsonSchemaParser(schema, config=cfg)
+    )
+    seq_cls = FastSequenceParser if FastSequenceParser is not None else SequenceParser
+    parser = seq_cls(
         [
             StringParser("<tool_call>\n"),
-            JsonSchemaParser(schema),
+            json_parser,
             StringParser("\n</tool_call>"),
         ]
     )
-    return TokenEnforcer(tokenizer_data, parser)
+    enforcer = TokenEnforcer(tokenizer_data, parser)
+    if cfg is not None:
+        enforcer.root_parser.config = cfg
+    shared_cache = getattr(tokenizer_data, "_shared_allowed_token_cache", None)
+    if shared_cache is None:
+        shared_cache = {}
+        try:
+            setattr(tokenizer_data, "_shared_allowed_token_cache", shared_cache)
+        except Exception:
+            pass
+    enforcer.allowed_token_cache = shared_cache
+    return enforcer
 
 
 def evaluate_tool_calls(
@@ -379,7 +478,7 @@ def evaluate_tool_calls(
     mode: EvalMode = "unconstrained",
     device: str | torch.device | None = None,
     batch_size: int = 16,
-    max_new_tokens: int = 256,
+    max_new_tokens: int = 192,
 ) -> tuple[list[ItemOutcome], EvalScores]:
     if device is None:
         if torch.cuda.is_available():

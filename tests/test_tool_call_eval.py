@@ -297,3 +297,41 @@ def test_sanitize_schema_for_enforcer_handles_untyped_bfcl_random_forest():
     sample = '<tool_call>\n{"name": "random_forest.train", "arguments": {"n_estimators": 100, "max_depth": 5, "data": "my_data"}}\n</tool_call>'
     for ch in sample:
         parser = parser.add_character(ch)
+
+
+def test_fast_sequence_parser_forwards_shortcut_and_cache_key():
+    from qnn_edge_agent.eval.tool_call_eval import (
+        FastJsonSchemaParser,
+        FastSequenceParser,
+    )
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"const": "echo"},
+            "arguments": {
+                "type": "object",
+                "properties": {"msg": {"type": "string"}},
+                "required": ["msg"],
+            },
+        },
+        "required": ["name", "arguments"],
+    }
+    parser = FastSequenceParser(
+        [
+            StringParser("<tool_call>\n"),
+            FastJsonSchemaParser(schema),
+            StringParser("\n</tool_call>"),
+        ]
+    )
+    prefix = '<tool_call>\n{"name": "echo", "arguments": {"msg": '
+    for ch in prefix:
+        parser = parser.add_character(ch)
+    assert parser.cache_key() is not None
+    assert parser.cache_key()[0] == "json_str_start"
+
+    parser = parser.add_character('"')
+    assert parser.shortcut_key() is not None
+    assert parser.shortcut_key()[0] == "json_freetext"
+    assert parser.cache_key() is not None
+    assert parser.cache_key()[0] == "json_str_body"
