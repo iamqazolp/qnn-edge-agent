@@ -19,7 +19,9 @@ from lmformatenforcer import (
     SequenceParser,
     StringParser,
     TokenEnforcer,
+    UnionParser,
 )
+from lmformatenforcer.consts import COMPLETE_ALPHABET
 from lmformatenforcer.integrations.transformers import (
     TokenEnforcerTokenizerData,
     build_token_enforcer_tokenizer_data,
@@ -340,6 +342,9 @@ def sanitize_schema_for_enforcer(schema: dict[str, Any]) -> dict[str, Any]:
             k: sanitize_schema_for_enforcer(v) if isinstance(v, dict) else {"type": "string"}
             for k, v in out["properties"].items()
         }
+        if "required" in out and isinstance(out["required"], list):
+            req_set = set(out["required"])
+            out["required"] = [k for k in out["properties"] if k in req_set]
 
     if "items" in out and isinstance(out["items"], dict):
         out["items"] = sanitize_schema_for_enforcer(out["items"])
@@ -347,7 +352,26 @@ def sanitize_schema_for_enforcer(schema: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_COMPACT_ALPHABET: str = COMPLETE_ALPHABET + "³♥♠♦♣~|"
+
+
 if JsonSchemaParser is not None and SequenceParser is not None:
+
+    def _upgrade_parser_tree(p: Any) -> Any:
+        if isinstance(p, JsonSchemaParser) and not isinstance(
+            p, FastJsonSchemaParser
+        ):
+            p.__class__ = FastJsonSchemaParser
+        elif isinstance(p, SequenceParser) and not isinstance(
+            p, FastSequenceParser
+        ):
+            p.__class__ = FastSequenceParser
+            for child in p.parsers:
+                _upgrade_parser_tree(child)
+        elif UnionParser is not None and isinstance(p, UnionParser):
+            for child in p.parsers:
+                _upgrade_parser_tree(child)
+        return p
 
     class FastJsonSchemaParser(JsonSchemaParser):
         """JsonSchemaParser with token-mask caching for unconstrained string value states."""
@@ -382,11 +406,7 @@ if JsonSchemaParser is not None and SequenceParser is not None:
 
         def add_character(self, new_character: str) -> Any:
             res = super().add_character(new_character)
-            if isinstance(res, JsonSchemaParser) and not isinstance(
-                res, FastJsonSchemaParser
-            ):
-                res.__class__ = FastJsonSchemaParser
-            return res
+            return _upgrade_parser_tree(res)
 
     class FastSequenceParser(SequenceParser):
         """SequenceParser that forwards shortcut_key and cache_key while head parser cannot end."""
@@ -403,11 +423,7 @@ if JsonSchemaParser is not None and SequenceParser is not None:
 
         def add_character(self, new_character: str) -> Any:
             res = super().add_character(new_character)
-            if isinstance(res, SequenceParser) and not isinstance(
-                res, FastSequenceParser
-            ):
-                res.__class__ = FastSequenceParser
-            return res
+            return _upgrade_parser_tree(res)
 
 else:
     FastJsonSchemaParser = None  # type: ignore[assignment,misc]
@@ -435,14 +451,17 @@ def build_constrained_enforcer(
             }
         )
 
-    schema = {"type": "object", "anyOf": anyof_branches}
+    schema = (
+        anyof_branches[0]
+        if len(anyof_branches) == 1
+        else {"type": "object", "anyOf": anyof_branches}
+    )
     cfg = None
-    if CharacterLevelParserConfig is not None and hasattr(
-        tokenizer_data, "tokenizer_alphabet"
-    ):
+    if CharacterLevelParserConfig is not None:
         cfg = CharacterLevelParserConfig(
-            alphabet=tokenizer_data.tokenizer_alphabet,
+            alphabet=_COMPACT_ALPHABET,
             max_consecutive_whitespaces=2,
+            force_json_field_order=True,
         )
     json_parser = (
         FastJsonSchemaParser(schema, config=cfg)
@@ -527,12 +546,12 @@ def evaluate_tool_calls(
                 eos_id = tokenizer.eos_token_id
 
                 def prefix_fn(batch_id: int, sent: torch.Tensor) -> list[int]:
-                    sent_list = sent.tolist()
-                    if eos_id is not None and eos_id in sent_list[input_len:]:
+                    gen_list = sent[input_len:].tolist()
+                    if eos_id is not None and eos_id in gen_list:
                         return [eos_id]
                     return (
                         batch_enforcers[batch_id]
-                        .get_allowed_tokens(sent_list)
+                        .get_allowed_tokens([0, *gen_list])
                         .allowed_tokens
                     )
 
