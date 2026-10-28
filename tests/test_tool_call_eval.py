@@ -335,3 +335,58 @@ def test_fast_sequence_parser_forwards_shortcut_and_cache_key():
     assert parser.shortcut_key()[0] == "json_freetext"
     assert parser.cache_key() is not None
     assert parser.cache_key()[0] == "json_str_body"
+
+
+def test_fast_json_schema_parser_preserved_across_anyof_union_branches():
+    from lmformatenforcer import CharacterLevelParserConfig
+    from qnn_edge_agent.eval.tool_call_eval import (
+        FastJsonSchemaParser,
+        FastSequenceParser,
+    )
+
+    cfg = CharacterLevelParserConfig(force_json_field_order=True)
+    schema = {
+        "type": "object",
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"const": "tool_a"},
+                    "arguments": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+                "required": ["name", "arguments"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"const": "tool_b"},
+                    "arguments": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+                "required": ["name", "arguments"],
+            },
+        ],
+    }
+    parser = FastSequenceParser(
+        [
+            StringParser("<tool_call>\n"),
+            FastJsonSchemaParser(schema, config=cfg),
+            StringParser("\n</tool_call>"),
+        ]
+    )
+    prefix = '<tool_call>\n{"name": "tool_b", "arguments": {"path": "'
+    for ch in prefix:
+        parser = parser.add_character(ch)
+
+    assert isinstance(parser, FastSequenceParser)
+    assert isinstance(parser.parsers[0], FastJsonSchemaParser)
+    assert parser.shortcut_key() is not None
+    assert parser.shortcut_key()[0] == "json_freetext"
+    assert parser.cache_key() == ("json_str_body", (" \t\n\r}", " \t\n\r}"))
