@@ -368,7 +368,10 @@ def sanitize_schema_for_enforcer(schema: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-_COMPACT_ALPHABET: str = COMPLETE_ALPHABET + "³♥♠♦♣~|"
+_LATIN1_AND_PUNCT: str = (
+    "".join(chr(c) for c in range(0xA0, 0x100)) + "–—…’‘“”•€£¥℃™|~♥♠♦♣"
+)
+_COMPACT_ALPHABET: str = COMPLETE_ALPHABET + _LATIN1_AND_PUNCT
 
 
 if JsonSchemaParser is not None and SequenceParser is not None:
@@ -391,6 +394,23 @@ if JsonSchemaParser is not None and SequenceParser is not None:
 
     class FastJsonSchemaParser(JsonSchemaParser):
         """JsonSchemaParser with token-mask caching for unconstrained string value states."""
+
+        def _in_open_freetext_string(self) -> bool:
+            if not self.object_stack:
+                return False
+            curr = self.object_stack[-1]
+            return (
+                StringParsingState is not None
+                and isinstance(curr, StringParsingState)
+                and curr.seen_opening_quote
+                and not curr.seen_closing_quote
+                and not curr.allowed_strings
+                and not curr.regex_parser
+                and (
+                    curr.max_length is None
+                    or len(curr.parsed_string) < curr.max_length
+                )
+            )
 
         def cache_key(self) -> Any:
             if self.object_stack and not self.can_end():
@@ -421,8 +441,31 @@ if JsonSchemaParser is not None and SequenceParser is not None:
             return None
 
         def add_character(self, new_character: str) -> Any:
+            if self._in_open_freetext_string() and new_character not in ('"', "\\"):
+                self.context.active_parser = self
+                curr = self.object_stack[-1]
+                updated_stack = self.object_stack[:-1] + [
+                    curr.add_character(new_character)
+                ]
+                updated = FastJsonSchemaParser(
+                    self.context, self.config, updated_stack, 0
+                )
+                updated.context.active_parser = updated
+                updated.last_parsed_string = self.last_parsed_string
+                updated.last_non_whitespace_character = (
+                    self.last_non_whitespace_character
+                    if new_character in " \t\n\r"
+                    else new_character
+                )
+                return updated
             res = super().add_character(new_character)
-            return _upgrade_parser_tree(res)
+            res = _upgrade_parser_tree(res)
+            if (
+                isinstance(res, FastJsonSchemaParser)
+                and res._in_open_freetext_string()
+            ):
+                res.num_consecutive_whitespaces = 0
+            return res
 
     class FastSequenceParser(SequenceParser):
         """SequenceParser that forwards shortcut_key and cache_key while head parser cannot end."""
@@ -438,6 +481,17 @@ if JsonSchemaParser is not None and SequenceParser is not None:
             return super().cache_key()
 
         def add_character(self, new_character: str) -> Any:
+            if (
+                self.parsers
+                and isinstance(self.parsers[0], FastJsonSchemaParser)
+                and not self.parsers[0].can_end()
+                and self.parsers[0]._in_open_freetext_string()
+                and new_character not in ('"', "\\")
+            ):
+                updated_head = self.parsers[0].add_character(new_character)
+                if len(self.parsers) == 1:
+                    return updated_head
+                return FastSequenceParser([updated_head] + self.parsers[1:])
             res = super().add_character(new_character)
             return _upgrade_parser_tree(res)
 
@@ -565,11 +619,14 @@ def evaluate_tool_calls(
                     gen_list = sent[input_len:].tolist()
                     if eos_id is not None and eos_id in gen_list:
                         return [eos_id]
-                    return (
+                    allowed = (
                         batch_enforcers[batch_id]
                         .get_allowed_tokens([0, *gen_list])
                         .allowed_tokens
                     )
+                    if not allowed and eos_id is not None:
+                        return [eos_id]
+                    return allowed
 
                 outputs = model.generate(
                     **inputs,

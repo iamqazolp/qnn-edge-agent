@@ -390,3 +390,50 @@ def test_fast_json_schema_parser_preserved_across_anyof_union_branches():
     assert parser.shortcut_key() is not None
     assert parser.shortcut_key()[0] == "json_freetext"
     assert parser.cache_key() == ("json_str_body", (" \t\n\r}", " \t\n\r}"))
+
+
+def test_fast_parser_accepts_unicode_and_multi_whitespace_in_string_body():
+    from lmformatenforcer import CharacterLevelParserConfig
+    from qnn_edge_agent.eval.tool_call_eval import (
+        FastJsonSchemaParser,
+        FastSequenceParser,
+        _COMPACT_ALPHABET,
+    )
+
+    cfg = CharacterLevelParserConfig(
+        alphabet=_COMPACT_ALPHABET,
+        max_consecutive_whitespaces=2,
+        force_json_field_order=True,
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"const": "concert.get_details"},
+            "arguments": {
+                "type": "object",
+                "properties": {
+                    "artist": {"type": "string"},
+                    "location": {"type": "string"},
+                },
+                "required": ["artist", "location"],
+            },
+        },
+        "required": ["name", "arguments"],
+    }
+    parser = FastSequenceParser(
+        [
+            StringParser("<tool_call>\n"),
+            FastJsonSchemaParser(schema, config=cfg),
+            StringParser("\n</tool_call>"),
+        ]
+    )
+    sample = (
+        '<tool_call>\n'
+        '{"name": "concert.get_details", "arguments": {"artist": "Beyoncé    東京 🚀", "location": "San Diego"}}\n'
+        '</tool_call>'
+    )
+    for ch in sample:
+        parser = parser.add_character(ch)
+
+    assert parser.can_end()
+
