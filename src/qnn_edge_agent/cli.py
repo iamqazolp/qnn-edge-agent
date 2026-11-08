@@ -9,20 +9,43 @@ import time
 from pathlib import Path
 from typing import Any
 
-import torch
-import yaml
-from transformers import AutoModelForCausalLM, AutoTokenizer
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore[assignment]
+
+try:
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    AutoModelForCausalLM = None  # type: ignore[assignment,misc]
+    AutoTokenizer = None  # type: ignore[assignment,misc]
 
 from qnn_edge_agent.agent.reliability import (
     HuggingFaceToolGenerator,
+    InPlaceW4A16FallbackGenerator,
     ReliableToolAgent,
+)
+from qnn_edge_agent.agent.server import (
+    EdgeConsoleService,
+    create_http_server,
+    get_lan_ip,
 )
 from qnn_edge_agent.agent.tools import EdgeToolEnvironment, load_edge_tool_schemas
 from qnn_edge_agent.env import MODEL_ID, REPO_ROOT
-from qnn_edge_agent.eval.perplexity import evaluate_wikitext2_perplexity
 from qnn_edge_agent.eval.tool_call_eval import compute_eval_scores, evaluate_tool_calls
-from qnn_edge_agent.quant.calibrate import CalibStats, calibrate_model
-from qnn_edge_agent.quant.fake_quant import apply_recipe
+
+try:
+    from qnn_edge_agent.eval.perplexity import evaluate_wikitext2_perplexity
+    from qnn_edge_agent.quant.calibrate import CalibStats, calibrate_model
+    from qnn_edge_agent.quant.fake_quant import apply_recipe
+except ImportError:
+    evaluate_wikitext2_perplexity = None  # type: ignore[assignment]
+    CalibStats = Any  # type: ignore[assignment,misc]
+    calibrate_model = None  # type: ignore[assignment]
+    apply_recipe = None  # type: ignore[assignment]
+
 from qnn_edge_agent.types import EvalMode, ItemOutcome, LayerQuant, QuantFormat, Recipe
 
 PC_TOOL_NAMES: frozenset[str] = frozenset({
@@ -43,11 +66,111 @@ IOT_TOOL_NAMES: frozenset[str] = frozenset({
     "camera_capture",
 })
 
+_DEFAULT_EXPERIMENTS: dict[str, dict[str, Any]] = {
+    "E0": {
+        "id": "E0",
+        "smooth": "none",
+        "alpha": None,
+        "default": {"weight": None, "act": None, "adaround": False},
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E1": {
+        "id": "E1",
+        "smooth": "none",
+        "alpha": None,
+        "default": {
+            "weight": {"bits": 8, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E2": {
+        "id": "E2",
+        "smooth": "none",
+        "alpha": None,
+        "default": {
+            "weight": {"bits": 4, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E2a": {
+        "id": "E2a",
+        "smooth": "none",
+        "alpha": None,
+        "default": {
+            "weight": {"bits": 4, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 16, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E2b": {
+        "id": "E2b",
+        "smooth": "none",
+        "alpha": None,
+        "default": {
+            "weight": None,
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E4": {
+        "id": "E4",
+        "smooth": "ABC",
+        "alpha": 0.5,
+        "default": {
+            "weight": {"bits": 4, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+    "E4s": {
+        "id": "E4s",
+        "smooth": "ABC",
+        "alpha": "search",
+        "default": {
+            "weight": {"bits": 4, "symmetric": True, "granularity": "per_channel"},
+            "act": {"bits": 8, "symmetric": False, "granularity": "per_tensor"},
+            "adaround": False,
+        },
+        "allocator": "uniform",
+        "bit_budget": None,
+        "clip_search": False,
+        "kv_bits": 16,
+    },
+}
+
 
 def load_recipe_registry(config_path: Path | None = None) -> dict[str, Recipe]:
     path = config_path or (REPO_ROOT / "configs" / "experiments.yaml")
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)["experiments"]
+    if yaml is not None and path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f)["experiments"]
+    else:
+        raw = _DEFAULT_EXPERIMENTS
 
     registry: dict[str, Recipe] = {}
     for rid, d in raw.items():
@@ -159,7 +282,7 @@ def compute_calib_sha256(calib_items: list[dict[str, Any]]) -> str:
 
 
 def quantize_to_artifact(
-    model: torch.nn.Module,
+    model: Any,
     tokenizer: Any,
     recipe: Recipe,
     calib_items: list[dict[str, Any]],
@@ -218,6 +341,11 @@ def cmd_recipes(args: argparse.Namespace) -> int:
 
 
 def _load_model_and_tokenizer(model_id: str, device: str) -> tuple[Any, Any]:
+    if torch is None or AutoTokenizer is None or AutoModelForCausalLM is None:
+        raise RuntimeError(
+            "PyTorch and transformers are required for live model execution. "
+            "On Termux/mobile, use --offline-demo or 'qea serve'."
+        )
     try:
         tok = AutoTokenizer.from_pretrained(model_id, local_files_only=True)
         mod = AutoModelForCausalLM.from_pretrained(
@@ -234,9 +362,9 @@ def _load_model_and_tokenizer(model_id: str, device: str) -> tuple[Any, Any]:
 def _resolve_device(device_arg: str | None) -> str:
     if device_arg:
         return device_arg
-    if torch.cuda.is_available():
+    if torch is not None and torch.cuda.is_available():
         return "cuda"
-    if torch.backends.mps.is_available():
+    if torch is not None and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
 
@@ -495,28 +623,64 @@ def cmd_agent(args: argparse.Namespace) -> int:
             if needs_calib
             else None
         )
-        apply_recipe(primary_model, primary_recipe, calib_stats=calib_stats)
+        primary_info = apply_recipe(primary_model, primary_recipe, calib_stats=calib_stats)
         primary_gen_hf = HuggingFaceToolGenerator(primary_model, tokenizer, device=device)
 
-        fallback_gen_hf = None
+        fallback_gen_hf: Any = None
+        fallback_overhead_mb = 0.0
         if args.fallback_recipe and args.fallback_recipe.lower() != "none":
             if args.fallback_recipe not in registry:
                 raise KeyError(f"Unknown fallback recipe {args.fallback_recipe!r}")
             fb_recipe = registry[args.fallback_recipe]
-            fb_model, _ = _load_model_and_tokenizer(args.model, device)
-            apply_recipe(fb_model, fb_recipe, calib_stats=calib_stats)
-            fallback_gen_hf = HuggingFaceToolGenerator(fb_model, tokenizer, device=device)
+            can_promote_inplace = (
+                primary_recipe.default.weight is not None
+                and fb_recipe.default.weight is not None
+                and primary_recipe.default.weight.bits == fb_recipe.default.weight.bits
+                and fb_recipe.default.act is not None
+                and fb_recipe.default.act.bits == 16
+            )
+            if can_promote_inplace:
+                fallback_gen_hf = InPlaceW4A16FallbackGenerator(
+                    primary_generator=primary_gen_hf,
+                    hook_handles=primary_info["hook_handles"],
+                    active_calib=primary_info.get("active_calib", calib_stats),
+                    primary_act_bits=primary_recipe.default.act.bits if primary_recipe.default.act else 8,
+                    fallback_act_bits=16,
+                )
+            else:
+                fb_model, _ = _load_model_and_tokenizer(args.model, device)
+                fb_info = apply_recipe(fb_model, fb_recipe, calib_stats=calib_stats)
+                fallback_gen_hf = HuggingFaceToolGenerator(fb_model, tokenizer, device=device)
+                fallback_overhead_mb = float(fb_info["footprint_mb"])
 
         agent = ReliableToolAgent(
             env=env,
             primary_generator=primary_gen_hf,
             fallback_generator=fallback_gen_hf,
             enable_grammar_retry=not args.no_grammar_retry,
+            fallback_memory_overhead_mb=fallback_overhead_mb,
         )
 
     result = agent.run_turn(messages=messages, tools=tools, execute_tool=True)
     print(json.dumps(result.to_dict(), indent=2))
     return 0 if result.ok else 1
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    ws_dir = Path(args.workspace_dir) if args.workspace_dir else None
+    svc = EdgeConsoleService(workspace_dir=ws_dir)
+    server = create_http_server(host=args.host, port=args.port, service=svc)
+    lan_ip = get_lan_ip()
+    print("qnn-edge-agent Mobile/Web Edge Console listening on:")
+    print(f"  Local:   http://127.0.0.1:{args.port}")
+    print(f"  Phone:   http://{lan_ip}:{args.port}  (open on your Xiaomi 14 Pro over Wi-Fi)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -553,7 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ev.add_argument("--skip-ppl", action="store_true", help="Skip WikiText-2 perplexity")
     p_ev.add_argument("--batch-size", type=int, default=8, help="Batch size")
     p_ev.add_argument("--device", type=str, default=None, help="Execution device")
-    p_ev.add_argument("--output-dir", type=str, default=None, help="Output directory")
+    p_ev.add_argument("--output-dir", type=str, help="Output directory", default=None)
     p_ev.add_argument("--min-exact", type=float, default=None, help="Quality gate: minimum exact match rate [0..1]")
     p_ev.add_argument("--min-json-valid", type=float, default=None, help="Quality gate: minimum valid JSON rate [0..1]")
     p_ev.set_defaults(func=cmd_eval)
@@ -567,7 +731,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ag.add_argument("--prompt", type=str, default=None, help="User prompt (overrides --item-id)")
     p_ag.add_argument("--item-id", type=str, default="iot_eval_00", help="Item ID from data/iot_items.json")
     p_ag.add_argument("--recipe", type=str, default="E4s", help="Primary quantized recipe ID")
-    p_ag.add_argument("--fallback-recipe", type=str, default="E1", help="Fallback recipe ID (e.g. E1 or 'none')")
+    p_ag.add_argument(
+        "--fallback-recipe",
+        type=str,
+        default="E2a",
+        help="Fallback recipe ID (default E2a for zero-RAM in-place W4A16 promotion, E1 for W8A8, or 'none')",
+    )
     p_ag.add_argument("--no-grammar-retry", action="store_true", help="Disable grammar-constrained retry stage")
     p_ag.add_argument("--workspace-dir", type=str, default=None, help="Sandboxed workspace directory for PC tools")
     p_ag.add_argument("--model", type=str, default=MODEL_ID, help="Hugging Face model ID")
@@ -582,6 +751,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Simulate a quantization fault in --offline-demo mode to demonstrate recovery",
     )
     p_ag.set_defaults(func=cmd_agent)
+
+    p_srv = sub.add_parser("serve", help="Launch mobile/web Edge Console for live phone or browser demos.")
+    p_srv.add_argument("--host", type=str, default="0.0.0.0", help="Bind address (default 0.0.0.0 for LAN/phone access)")
+    p_srv.add_argument("--port", type=int, default=8080, help="HTTP port (default 8080)")
+    p_srv.add_argument("--workspace-dir", type=str, default=None, help="Sandboxed workspace directory")
+    p_srv.set_defaults(func=cmd_serve)
 
     return parser
 

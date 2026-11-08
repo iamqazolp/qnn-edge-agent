@@ -1,6 +1,14 @@
-from qnn_edge_agent.agent.reliability import ReliableToolAgent
+import torch
+import torch.nn as nn
+
+from qnn_edge_agent.agent.reliability import (
+    InPlaceW4A16FallbackGenerator,
+    ReliableToolAgent,
+)
 from qnn_edge_agent.agent.tools import EdgeToolEnvironment
-from qnn_edge_agent.cli import main
+from qnn_edge_agent.cli import load_recipe_registry, main
+from qnn_edge_agent.quant.calibrate import CalibStats
+from qnn_edge_agent.quant.fake_quant import apply_recipe
 from qnn_edge_agent.types import EvalMode
 
 
@@ -101,3 +109,66 @@ def test_cli_agent_offline_demo_recovery_paths(tmp_path, capsys):
         assert rc == 0
         out = capsys.readouterr().out
         assert f'"path_taken": "{expected_path}"' in out
+
+
+def test_inplace_w4a16_fallback_promotes_hooks_with_zero_ram_overhead():
+    class _TinyLayer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.self_attn = nn.Module()
+            self.self_attn.q_proj = nn.Linear(8, 8, bias=False)
+            self.mlp = nn.Module()
+            self.mlp.down_proj = nn.Linear(8, 8, bias=False)
+
+    class _TinyModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList([_TinyLayer()])
+
+    model = _TinyModel()
+    calib = CalibStats(
+        act_ranges={
+            "model.layers.0.self_attn.q_proj": (-1.0, 1.0),
+            "model.layers.0.mlp.down_proj": (-2.0, 2.0),
+        },
+        act_scales={},
+        group_ranges={},
+        act_minmax={
+            "model.layers.0.self_attn.q_proj": (-3.0, 3.0),
+            "model.layers.0.mlp.down_proj": (-10.0, 10.0),
+        },
+    )
+    registry = load_recipe_registry()
+    info = apply_recipe(model, registry["E2"], calib_stats=calib)
+    assert len(info["hook_handles"]) == 2
+
+    x = torch.tensor([[5.0] * 8])
+    out_a8 = model.model.layers[0].mlp.down_proj(x)
+
+    class _DummyPrimaryGen:
+        def __init__(self, m: nn.Module) -> None:
+            self.model = m
+            self.out_during_fallback: torch.Tensor | None = None
+
+        def __call__(self, _messages, _tools, _mode: EvalMode) -> str:
+            self.out_during_fallback = self.model.model.layers[0].mlp.down_proj(x)
+            return '<tool_call>\n{"name": "gpio_set", "arguments": {"pin": 16, "state": "HIGH"}}\n</tool_call>'
+
+    primary_gen = _DummyPrimaryGen(model)
+    fb_gen = InPlaceW4A16FallbackGenerator(
+        primary_generator=primary_gen,  # type: ignore[arg-type]
+        hook_handles=info["hook_handles"],
+        active_calib=calib,
+    )
+    assert fb_gen.memory_overhead_mb == 0.0
+
+    raw = fb_gen([], [], "constrained")
+    assert "gpio_set" in raw
+    assert primary_gen.out_during_fallback is not None
+    # During fallback, A16 uses unclipped [-10, 10] instead of A8 clipped [-2, 2]
+    assert not torch.allclose(out_a8, primary_gen.out_during_fallback)
+
+    # After fallback completes, A8 hooks are restored automatically
+    out_restored = model.model.layers[0].mlp.down_proj(x)
+    assert torch.allclose(out_a8, out_restored)

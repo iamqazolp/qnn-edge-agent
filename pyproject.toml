@@ -4,26 +4,26 @@ version = "0.1.0"
 description = "Activation-aware mixed-precision quantization and Snapdragon Hexagon NPU profiling for on-device function-calling SLMs"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.3",
-    "transformers>=4.45",
-    "datasets>=2.20",
-    "huggingface_hub>=0.24",
-    "numpy",
-    "scipy",
-    "pyyaml",
-    "python-dotenv",
-    "matplotlib",
-    "lm-format-enforcer>=0.10",
-    "onnx>=1.16",
-    "onnxruntime>=1.18",
-    "qai-hub>=0.20",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "torch>=2.3; platform_machine != 'aarch64'",
+    "transformers>=4.45; platform_machine != 'aarch64'",
+    "datasets>=2.20; platform_machine != 'aarch64'",
+    "huggingface_hub>=0.24; platform_machine != 'aarch64'",
+    "numpy; platform_machine != 'aarch64'",
+    "scipy; platform_machine != 'aarch64'",
+    "lm-format-enforcer>=0.10; platform_machine != 'aarch64'",
+    "onnx>=1.16; platform_machine != 'aarch64'",
+    "onnxruntime>=1.18; platform_machine != 'aarch64'",
+    "qai-hub>=0.20; platform_machine != 'aarch64'",
 ]
 
 [project.scripts]
 qea = "qnn_edge_agent.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "matplotlib"]
+termux = ["pyyaml>=6.0", "python-dotenv>=1.0"]
 
 [build-system]
 requires = ["hatchling"]
